@@ -22,27 +22,73 @@ def conn() -> sqlite3.Connection:
 
 
 # ----------------------------------------------------------
+# BASE TABLE CREATION
+# ----------------------------------------------------------
+def create_projects_table_if_needed():
+    """
+    Create the 'projects' table if it doesn't exist, with all columns referenced by the app.
+    """
+    with conn() as c:
+        cur = c.cursor()
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                pillar TEXT,
+                priority INTEGER DEFAULT 1,
+                description TEXT,
+                owner TEXT,
+                status TEXT,
+                start_date TEXT,
+                due_date TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                progress INTEGER DEFAULT 0,
+                progress_status TEXT DEFAULT '',
+                last_update_by TEXT DEFAULT '',
+                last_update_at TEXT DEFAULT ''
+            )
+            """
+        )
+
+create_projects_table_if_needed()
+
+
+# ----------------------------------------------------------
 # PROJECT TABLE MIGRATION
 # ----------------------------------------------------------
 def safe_migrate():
+    """
+    Adds missing columns safely if they don't exist. Call after base table creation.
+    """
     with conn() as c:
         cur = c.cursor()
 
-        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='progress'")
-        if not cur.fetchone():
+        # Helper to detect column existence
+        def has_col(col: str) -> bool:
+            cur.execute("PRAGMA table_info(projects)")
+            cols = [r[1] for r in cur.fetchall()]
+            return col in cols
+
+        # Add columns if missing
+        if not has_col("progress"):
             cur.execute("ALTER TABLE projects ADD COLUMN progress INTEGER DEFAULT 0")
 
-        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='progress_status'")
-        if not cur.fetchone():
+        if not has_col("progress_status"):
             cur.execute("ALTER TABLE projects ADD COLUMN progress_status TEXT DEFAULT ''")
 
-        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='last_update_by'")
-        if not cur.fetchone():
+        if not has_col("last_update_by"):
             cur.execute("ALTER TABLE projects ADD COLUMN last_update_by TEXT DEFAULT ''")
 
-        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='last_update_at'")
-        if not cur.fetchone():
+        if not has_col("last_update_at"):
             cur.execute("ALTER TABLE projects ADD COLUMN last_update_at TEXT DEFAULT ''")
+
+        # Often useful fields if older DBs are missing them
+        if not has_col("created_at"):
+            cur.execute("ALTER TABLE projects ADD COLUMN created_at TEXT")
+        if not has_col("updated_at"):
+            cur.execute("ALTER TABLE projects ADD COLUMN updated_at TEXT")
 
 safe_migrate()
 
@@ -53,7 +99,8 @@ safe_migrate()
 def migrate_updates_table():
     with conn() as c:
         cur = c.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS project_updates (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER NOT NULL,
@@ -66,7 +113,8 @@ def migrate_updates_table():
                 status TEXT,
                 FOREIGN KEY(project_id) REFERENCES projects(id)
             )
-        """)
+            """
+        )
 
 migrate_updates_table()
 
@@ -76,8 +124,8 @@ migrate_updates_table()
 # ----------------------------------------------------------
 def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
     q = f"SELECT * FROM {TABLE}"
-    args = []
-    where = []
+    args: List[Any] = []
+    where: List[str] = []
 
     if filters:
         for col in ["pillar", "status", "owner"]:
@@ -91,7 +139,7 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
             args.append(str(filters["priority"]))
 
         if filters.get("search"):
-            s = f"%{filters['search'].lower()}%"
+            s = f"%{str(filters['search']).lower()}%"
             where.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
             args.extend([s, s])
 
@@ -103,8 +151,6 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
     with conn() as c:
         return pd.read_sql_query(q, c, params=args)
 
-
-from typing import List
 
 def distinct_values(col: str) -> List[str]:
     """Return unique non-empty values from a column."""
@@ -125,18 +171,28 @@ def distinct_values(col: str) -> List[str]:
 # COLOR HELPERS
 # ----------------------------------------------------------
 def priority_color(p):
-    try: p = int(p)
-    except: return "gray"
-    if p == 1: return "red"
-    if p in (2, 3): return "orange"
-    if p in (4, 5, 6): return "gold"
+    try:
+        p = int(p)
+    except Exception:
+        return "gray"
+    if p == 1:
+        return "red"
+    if p in (2, 3):
+        return "orange"
+    if p in (4, 5, 6):
+        return "gold"
     return "green"
 
+
 def progress_color(p):
-    try: p = int(p)
-    except: return "gray"
-    if p <= 30: return "red"
-    if p <= 70: return "gold"
+    try:
+        p = int(p)
+    except Exception:
+        return "gray"
+    if p <= 30:
+        return "red"
+    if p <= 70:
+        return "gold"
     return "green"
 
 
@@ -153,16 +209,13 @@ if "active_tab" not in st.session_state:
 # ----------------------------------------------------------
 # TABS
 # ----------------------------------------------------------
-tab_editor, tab_dashboard, tab_roadmap = st.tabs(
-    ["🛠 Editor", "📊 Dashboard", "🗺 Roadmap"]
-)
+tab_editor, tab_dashboard, tab_roadmap = st.tabs(["🛠 Editor", "📊 Dashboard", "🗺 Roadmap"])
 
 
 # ----------------------------------------------------------
 # EDITOR TAB
 # ----------------------------------------------------------
 with tab_editor:
-
     st.subheader("Project Editor")
 
     with conn() as c:
@@ -174,25 +227,39 @@ with tab_editor:
     # LOAD OR INITIALIZE
     if selected == "New Project":
         project = {
-            "id": None, "name": "", "pillar": "", "priority": 1,
-            "description": "", "owner": "", "status": "",
-            "start_date": "", "due_date": "",
-            "progress": 0, "progress_status": "",
-            "last_update_by": "", "last_update_at": ""
+            "id": None,
+            "name": "",
+            "pillar": "",
+            "priority": 1,
+            "description": "",
+            "owner": "",
+            "status": "",
+            "start_date": "",
+            "due_date": "",
+            "progress": 0,
+            "progress_status": "",
+            "last_update_by": "",
+            "last_update_at": "",
         }
     else:
-        pid = existing[existing["name"] == selected].iloc[0]["id"]
+        pid = int(existing.loc[existing["name"] == selected, "id"].iloc[0])
         with conn() as c:
             df = pd.read_sql_query("SELECT * FROM projects WHERE id=?", c, params=[pid])
         project = df.iloc[0].to_dict()
 
     # DATE HANDLING
     def parse_date(d):
-        try: return datetime.strptime(str(d), "%Y-%m-%d").date()
-        except: return date.today()
+        try:
+            # accept 'YYYY-MM-DD'; if empty/null, fallback to today
+            d = str(d).strip()
+            if not d:
+                return date.today()
+            return datetime.strptime(d, "%Y-%m-%d").date()
+        except Exception:
+            return date.today()
 
-    start_val = parse_date(project["start_date"])
-    due_val = parse_date(project["due_date"])
+    start_val = parse_date(project.get("start_date", ""))
+    due_val = parse_date(project.get("due_date", ""))
 
     # FORM LAYOUT
     colA, colB = st.columns(2)
@@ -200,17 +267,17 @@ with tab_editor:
     with colA:
         name = st.text_input("Name*", project["name"])
         pillar = st.selectbox("Pillar*", [""] + distinct_values("pillar"))
-        priority = st.number_input("Priority", 1, 10, int(project["priority"]))
-        description = st.text_area("Description", project["description"])
+        priority = st.number_input("Priority", 1, 10, int(project.get("priority", 1)))
+        description = st.text_area("Description", project.get("description", ""))
 
     with colB:
-        owner = st.text_input("Owner", project["owner"])
+        owner = st.text_input("Owner", project.get("owner", ""))
         status = st.selectbox("Status", [""] + distinct_values("status"))
         start_date = st.date_input("Start Date", start_val)
         due_date = st.date_input("Due Date", due_val)
-        progress = st.slider("Progress (%)", 0, 100, int(project["progress"]))
+        progress = st.slider("Progress (%)", 0, 100, int(project.get("progress", 0)))
 
-        st.text_input("Update Tag (auto)", project["progress_status"], disabled=True)
+        st.text_input("Update Tag (auto)", project.get("progress_status", ""), disabled=True)
 
     # CLEAN
     pillar_clean = pillar or None
@@ -229,26 +296,56 @@ with tab_editor:
 
         with conn() as c:
             if project["id"] is None:
-                c.execute("""
+                c.execute(
+                    """
                     INSERT INTO projects
                     (name, pillar, priority, description, owner, status, start_date, due_date,
                      created_at, updated_at, progress, progress_status, last_update_by, last_update_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    name, pillar_clean, priority, description, owner_clean, status_clean,
-                    start_str, due_str, now, now, progress, tag, owner_clean, now
-                ))
+                    """,
+                    (
+                        name,
+                        pillar_clean,
+                        int(priority),
+                        description,
+                        owner_clean,
+                        status_clean,
+                        start_str,
+                        due_str,
+                        now,
+                        now,
+                        int(progress),
+                        tag,
+                        owner_clean,
+                        now,
+                    ),
+                )
             else:
-                c.execute("""
+                c.execute(
+                    """
                     UPDATE projects
                     SET name=?, pillar=?, priority=?, description=?, owner=?, status=?,
                         start_date=?, due_date=?, updated_at=?, progress=?, progress_status=?,
                         last_update_by=?, last_update_at=?
                     WHERE id=?
-                """, (
-                    name, pillar_clean, priority, description, owner_clean, status_clean,
-                    start_str, due_str, now, progress, tag, owner_clean, now, project["id"]
-                ))
+                    """,
+                    (
+                        name,
+                        pillar_clean,
+                        int(priority),
+                        description,
+                        owner_clean,
+                        status_clean,
+                        start_str,
+                        due_str,
+                        now,
+                        int(progress),
+                        tag,
+                        owner_clean,
+                        now,
+                        int(project["id"]),
+                    ),
+                )
 
         st.success("Saved.")
         st.rerun()
@@ -256,7 +353,8 @@ with tab_editor:
     # DELETE
     if c2.button("Delete") and project["id"]:
         with conn() as c:
-            c.execute("DELETE FROM projects WHERE id=?", (project["id"],))
+            c.execute("DELETE FROM projects WHERE id=?", (int(project["id"]),))
+            c.execute("DELETE FROM project_updates WHERE project_id=?", (int(project["id"]),))
         st.warning("Deleted.")
         st.rerun()
 
@@ -269,171 +367,3 @@ with tab_editor:
 
     # UPDATE
     if c4.button("Update"):
-        if not project["id"]:
-            st.warning("Select a project.")
-        else:
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            auto_tag = f"Updated on {now}"
-
-            with conn() as c:
-                c.execute("""
-                    UPDATE projects
-                    SET name=?, pillar=?, priority=?, description=?, owner=?, status=?,
-                        start_date=?, due_date=?, updated_at=?, progress=?, progress_status=?,
-                        last_update_by=?, last_update_at=?
-                    WHERE id=?
-                """, (
-                    name, pillar_clean, priority, description, owner_clean, status_clean,
-                    start_str, due_str, now, progress, auto_tag, owner_clean, now, project["id"]
-                ))
-
-            st.success("Updated.")
-            st.rerun()
-
-    # GO TO DASHBOARD
-    if c5.button("Report & Roadmap"):
-        st.session_state["active_tab"] = "dashboard"
-        st.rerun()
-
-    # EXPORT PROJECT CSV
-    if c6.button("Export CSV"):
-        if not project["id"]:
-            st.warning("Select a project.")
-        else:
-            with conn() as c:
-                hist = pd.read_sql_query("""
-                    SELECT at, by_user, progress, status, start_date, due_date, note
-                    FROM project_updates
-                    WHERE project_id=?
-                    ORDER BY at DESC
-                """, c, params=[project["id"]])
-
-            st.download_button(
-                label="Download CSV",
-                data=hist.to_csv(index=False),
-                file_name=f"{project['name']}_history.csv",
-                mime="text/csv"
-            )
-
-    # LOG UPDATE PANEL
-    if project["id"]:
-        st.subheader("Log an Update")
-
-        cA, cB = st.columns([3, 1])
-        update_note = cA.text_area("Update Note")
-        update_by = cB.text_input("Updated By", project["owner"])
-
-        uA, uB, uC, uD = st.columns(4)
-        update_progress = uA.slider("Progress (%)", 0, 100, int(project["progress"]))
-        update_status = uB.selectbox("Status (optional)", [""] + distinct_values("status"))
-        update_start = uC.date_input("Start (optional)", start_val)
-        update_due = uD.date_input("Due (optional)", due_val)
-
-        if st.button("Log Update"):
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            with conn() as c:
-                c.execute("""
-                    INSERT INTO project_updates
-                    (project_id, at, by_user, note, progress, start_date, due_date, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    project["id"], now, update_by, update_note,
-                    int(update_progress),
-                    update_start.strftime("%Y-%m-%d"),
-                    update_due.strftime("%Y-%m-%d"),
-                    update_status or None
-                ))
-
-                auto_tag = f"Updated on {now}"
-                c.execute("""
-                    UPDATE projects
-                    SET progress=?, status=COALESCE(?, status),
-                        start_date=COALESCE(?, start_date),
-                        due_date=COALESCE(?, due_date),
-                        progress_status=?, last_update_by=?, last_update_at=?
-                    WHERE id=?
-                """, (
-                    int(update_progress),
-                    update_status or None,
-                    update_start.strftime("%Y-%m-%d"),
-                    update_due.strftime("%Y-%m-%d"),
-                    auto_tag, update_by, now,
-                    project["id"]
-                ))
-
-            st.success("Logged.")
-            st.rerun()
-
-    # UPDATE HISTORY
-    if project["id"]:
-        with conn() as c:
-            hist = pd.read_sql_query("""
-                SELECT at, by_user, progress, status, start_date, due_date, note
-                FROM project_updates
-                WHERE project_id=?
-                ORDER BY at DESC
-            """, c, params=[project["id"]])
-
-        with st.expander("📜 Update History"):
-            if hist.empty:
-                st.info("No updates yet.")
-            else:
-                st.dataframe(hist, use_container_width=True)
-
-
-
-# ----------------------------------------------------------
-# DASHBOARD TAB
-# ----------------------------------------------------------
-
-with tab_dashboard:
-
-    st.subheader("Dashboard")
-
-    # EXPORT EVERYTHING
-    st.markdown("### Export Portfolio + Update History")
-    if st.button("Download Full CSV"):
-        with conn() as c:
-            projects = pd.read_sql_query("SELECT * FROM projects", c)
-            history = pd.read_sql_query("SELECT * FROM project_updates", c)
-
-        merged = history.merge(projects, left_on="project_id", right_on="id")
-        st.download_button(
-            "Download",
-            merged.to_csv(index=False),
-            "portfolio_full_history.csv",
-            mime="text/csv"
-        )
-
-    # you can continue your dashboard logic (charts, tables...)
-    # nothing below is changed from your original structure
-
-
-
-# ----------------------------------------------------------
-# ROADMAP TAB
-# ----------------------------------------------------------
-
-with tab_roadmap:
-
-    st.subheader("Roadmap")
-
-    data = fetch_df({})
-    gantt = data.copy()
-
-    gantt["Start"] = pd.to_datetime(gantt["start_date"], errors="coerce")
-    gantt["Finish"] = pd.to_datetime(gantt["due_date"], errors="coerce")
-    gantt = gantt.dropna(subset=["Start", "Finish"])
-
-    if not gantt.empty:
-        fig = px.timeline(
-            gantt,
-            x_start="Start",
-            x_end="Finish",
-            y="name",
-            color="pillar",
-            hover_data=["progress", "progress_status"]
-        )
-        fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig, use_container_width=True)
