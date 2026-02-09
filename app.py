@@ -88,76 +88,32 @@ def priority_color(p):
 
 
 def highlight_priority(val):
-    return f'color: {priority_color(val)}; font-weight:bold;'
+    return f"color: {priority_color(val)}; font-weight:bold;"
 
 
 # ----------------------------------------------------------
-#                STREAMLIT APP
+#                   STREAMLIT APP
 # ----------------------------------------------------------
 
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
 st.title("Digital Portfolio — Web Version")
-# ----------------------------------------------------------
-# ----------------------------------------------------------
-# DEBUG BUTTON — SHOW TABLE STRUCTURE
-# ----------------------------------------------------------
-with st.sidebar:
-    if st.button("Show projects table structure"):
-        import sqlite3
-        con = sqlite3.connect(DB_PATH)
-        cur = con.cursor()
-
-        cur.execute("PRAGMA table_info(projects)")
-        rows = cur.fetchall()
-
-        st.write("### SQLite table structure:")
-        for r in rows:
-            st.write(r)# ----------------------------------------------------------
-# ----------------------------------------------------------
-# SHOW SQLITE TABLE STRUCTURE (DEBUG)
-# ----------------------------------------------------------
-with st.sidebar:
-    st.write("### Debug Tools")
-    if st.button("Show SQL Table Structure"):
-        import sqlite3
-        con = sqlite3.connect(DB_PATH)
-        cur = con.cursor()
-        cur.execute("PRAGMA table_info(projects)")
-        rows = cur.fetchall()
-        st.code(rows)
-
-# DEBUG BUTTON — SHOW TABLE STRUCTURE
-# ----------------------------------------------------------
-with st.sidebar:
-    if st.button("Show projects table structure"):
-        import sqlite3
-        con = sqlite3.connect(DB_PATH)
-        cur = con.cursor()
-
-        cur.execute("PRAGMA table_info(projects)")
-        rows = cur.fetchall()
-
-        st.write("### SQLite table structure:")
-        for r in rows:
-            st.write(r)
-# ----------------------------------------------------------
-#   TEMPORARY DEBUG BUTTON — SHOW TABLE STRUCTURE
-# ----------------------------------------------------------
-with st.sidebar:
-    if st.button("SHOW PROJECTS TABLE STRUCTURE"):
-        import sqlite3
-        con = sqlite3.connect(DB_PATH)
-        cur = con.cursor()
-
-        cur.execute("PRAGMA table_info(projects)")
-        rows = cur.fetchall()
-
-        st.write("### SQLite Table Columns:")
-        st.code(rows)
 
 if not os.path.exists(DB_PATH):
     st.error("Database not found.")
     st.stop()
+
+# ----------------------------------------------------------
+#        SINGLE CLEAN TABLE STRUCTURE DEBUG BUTTON
+# ----------------------------------------------------------
+
+with st.sidebar:
+    if st.button("Show Projects Table Structure"):
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute("PRAGMA table_info(projects)")
+        st.write("### SQLite Table Columns:")
+        st.code(cur.fetchall())
+
 
 # ----------------------------------------------------------
 #                      TABS
@@ -168,7 +124,7 @@ tab_editor, tab_dashboard, tab_roadmap = st.tabs(
 )
 
 # ----------------------------------------------------------
-#                   TAB: EDITOR
+#                    TAB: EDITOR
 # ----------------------------------------------------------
 
 with tab_editor:
@@ -177,25 +133,36 @@ with tab_editor:
 
     # Load list of existing projects
     with conn() as c:
-        existing = pd.read_sql_query(f"SELECT id, name FROM {TABLE} ORDER BY name", c)
+        existing = pd.read_sql_query(
+            f"SELECT id, name FROM {TABLE} ORDER BY name", c
+        )
 
-    options = ["<New Project>"] + existing["name"].tolist()
+    options = ["New Project"] + existing["name"].tolist()
     selected = st.selectbox("Select Project", options)
 
     # Load selected row
-    if selected == "<New Project>":
+    if selected == "New Project":
         project = dict(
-            id=None, name="", pillar="", priority=1,
-            description="", owner="", status="",
-            start_date="", due_date=""
+            id=None,
+            name="",
+            pillar="",
+            priority=1,
+            description="",
+            owner="",
+            status="",
+            start_date="",
+            due_date=""
         )
     else:
         pid = existing[existing["name"] == selected].iloc[0]["id"]
         with conn() as c:
-            df = pd.read_sql_query(f"SELECT * FROM {TABLE} WHERE id = ?", c, params=[pid])
+            df = pd.read_sql_query(
+                f"SELECT * FROM {TABLE} WHERE id = ?",
+                c, params=[pid]
+            )
         project = df.iloc[0].to_dict()
 
-    # Parse dates
+    # Parse dates defaulting to today
     def parse_date(d):
         try:
             return datetime.strptime(str(d), "%Y-%m-%d").date()
@@ -213,6 +180,7 @@ with tab_editor:
         pillar = st.selectbox("Pillar*", [""] + distinct_values("pillar"))
         priority = st.number_input("Priority", 1, 10, int(project["priority"] or 1))
 
+        # Color indicator
         st.markdown(
             f"<span style='color:{priority_color(priority)}; font-size:22px;'>●</span> "
             f"<span style='color:{priority_color(priority)}; font-weight:bold;'>Priority Level</span>",
@@ -236,12 +204,13 @@ with tab_editor:
     # SAVE / UPDATE
     if c1.button("New / Save"):
         with conn() as c:
-            if selected == "<New Project>":
+            if selected == "New Project":
                 c.execute(
                     f"""INSERT INTO {TABLE}
                     (id, name, pillar, priority, description, owner, status, start_date, due_date)
                     VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (name, pillar, priority, description, owner, status, start_str, due_str),
+                    (name, pillar, priority, description, owner, status,
+                     start_str, due_str),
                 )
                 st.success("Project added.")
             else:
@@ -249,12 +218,13 @@ with tab_editor:
                     f"""UPDATE {TABLE}
                     SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?
                     WHERE id=?""",
-                    (name, pillar, priority, description, owner, status, start_str, due_str, project["id"]),
+                    (name, pillar, priority, description, owner, status,
+                     start_str, due_str, project["id"]),
                 )
                 st.success("Project updated.")
 
     # DELETE
-    if c2.button("Delete") and selected != "<New Project>":
+    if c2.button("Delete") and selected != "New Project":
         with conn() as c:
             c.execute(f"DELETE FROM {TABLE} WHERE id=?", (project["id"],))
         st.warning("Project deleted.")
@@ -263,8 +233,9 @@ with tab_editor:
     if c3.button("Clear"):
         st.experimental_rerun()
 
+
 # ----------------------------------------------------------
-#                TAB: DASHBOARD
+#                  TAB: DASHBOARD
 # ----------------------------------------------------------
 
 with tab_dashboard:
@@ -329,14 +300,19 @@ with tab_dashboard:
     if show_chart:
         st.markdown("---")
         df = data.copy()
-        df["state"] = df["status"].apply(lambda x: "Completed" if str(x).lower() == "done" else "Ongoing")
+        df["state"] = df["status"].apply(
+            lambda x: "Completed" if str(x).lower() == "done" else "Ongoing"
+        )
         summary = df.groupby(["pillar", "state"]).size().reset_index(name="count")
 
         if not summary.empty:
             fig = px.bar(
-                summary, x="pillar", y="count",
-                color="state", barmode="group",
-                title="Projects by Pillar — Completed vs Ongoing"
+                summary,
+                x="pillar",
+                y="count",
+                color="state",
+                barmode="group",
+                title="Projects by Pillar — Completed vs Ongoing",
             )
             st.plotly_chart(fig, use_container_width=True)
 
@@ -361,12 +337,13 @@ with tab_dashboard:
         st.subheader("Projects")
 
         st.dataframe(
-            data.style.applymap(highlight_priority, subset=['priority']),
+            data.style.applymap(highlight_priority, subset=["priority"]),
             use_container_width=True
         )
 
+
 # ----------------------------------------------------------
-#                TAB: ROADMAP
+#                   TAB: ROADMAP
 # ----------------------------------------------------------
 
 with tab_roadmap:
@@ -382,8 +359,11 @@ with tab_roadmap:
 
     if not gantt.empty:
         fig = px.timeline(
-            gantt, x_start="Start", x_end="Finish",
-            y="name", color="pillar"
+            gantt,
+            x_start="Start",
+            x_end="Finish",
+            y="name",
+            color="pillar"
         )
         fig.update_yaxes(autorange="reversed")
         st.plotly_chart(fig, use_container_width=True)
