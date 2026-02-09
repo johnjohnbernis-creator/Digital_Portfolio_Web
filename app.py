@@ -24,7 +24,7 @@ def try_date(s: Optional[str]) -> Optional[date]:
         return None
     try:
         return datetime.strptime(str(s), "%Y-%m-%d").date()
-    except Exception:
+    except:
         return None
 
 
@@ -72,19 +72,12 @@ def distinct_values(col: str) -> List[str]:
 
 # ---------- Priority Color Helpers ----------
 def priority_color(p):
-    try:
-        p = int(p)
-    except:
-        return "grey"
-
-    if p == 1:
-        return "red"
-    elif p in (2, 3):
-        return "orange"
-    elif p in (4, 5, 6):
-        return "gold"
-    else:
-        return "green"
+    try: p = int(p)
+    except: return "grey"
+    if p == 1: return "red"
+    if p in (2, 3): return "orange"
+    if p in (4, 5, 6): return "gold"
+    return "green"
 
 
 def highlight_priority(val):
@@ -102,10 +95,7 @@ if not os.path.exists(DB_PATH):
     st.error("Database not found.")
     st.stop()
 
-# ----------------------------------------------------------
-#  SINGLE DEBUG BUTTON — SHOW TABLE STRUCTURE
-# ----------------------------------------------------------
-
+# ---- Debug: Show Table Structure ----
 with st.sidebar:
     if st.button("Show Projects Table Structure"):
         con = sqlite3.connect(DB_PATH)
@@ -124,23 +114,19 @@ tab_editor, tab_dashboard, tab_roadmap = st.tabs(
 )
 
 # ----------------------------------------------------------
-#                    TAB: EDITOR
+#                   TAB: EDITOR
 # ----------------------------------------------------------
 
 with tab_editor:
 
     st.markdown("## Project Editor")
 
-    # Load list of existing projects
     with conn() as c:
-        existing = pd.read_sql_query(
-            f"SELECT id, name FROM {TABLE} ORDER BY name", c
-        )
+        existing = pd.read_sql_query(f"SELECT id, name FROM {TABLE} ORDER BY name", c)
 
     options = ["New Project"] + existing["name"].tolist()
     selected = st.selectbox("Select Project", options)
 
-    # Load selected row
     if selected == "New Project":
         project = dict(
             id=None,
@@ -156,17 +142,12 @@ with tab_editor:
     else:
         pid = existing[existing["name"] == selected].iloc[0]["id"]
         with conn() as c:
-            df = pd.read_sql_query(
-                f"SELECT * FROM {TABLE} WHERE id = ?",
-                c, params=[pid]
-            )
+            df = pd.read_sql_query("SELECT * FROM projects WHERE id=?", c, params=[pid])
         project = df.iloc[0].to_dict()
 
     def parse_date(d):
-        try:
-            return datetime.strptime(str(d), "%Y-%m-%d").date()
-        except:
-            return date.today()
+        try: return datetime.strptime(str(d), "%Y-%m-%d").date()
+        except: return date.today()
 
     start_val = parse_date(project.get("start_date"))
     due_val = parse_date(project.get("due_date"))
@@ -197,32 +178,32 @@ with tab_editor:
 
     c1, c2, c3 = st.columns(3)
 
-    # SAVE / UPDATE
     if c1.button("New / Save"):
         with conn() as c:
             if selected == "New Project":
                 c.execute(
-                    f"""INSERT INTO {TABLE}
+                    """
+                    INSERT INTO projects
                     (id, name, pillar, priority, description, owner, status, start_date, due_date)
-                    VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (name, pillar, priority, description, owner, status,
-                     start_str, due_str),
+                    VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (name, pillar, priority, description, owner, status, start_str, due_str),
                 )
                 st.success("Project added.")
             else:
                 c.execute(
-                    f"""UPDATE {TABLE}
+                    """
+                    UPDATE projects
                     SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?
-                    WHERE id=?""",
-                    (name, pillar, priority, description, owner, status,
-                     start_str, due_str, project["id"]),
+                    WHERE id=?
+                    """,
+                    (name, pillar, priority, description, owner, status, start_str, due_str, project["id"]),
                 )
                 st.success("Project updated.")
 
-    # DELETE
     if c2.button("Delete") and selected != "New Project":
         with conn() as c:
-            c.execute(f"DELETE FROM {TABLE} WHERE id=?", (project["id"],))
+            c.execute("DELETE FROM projects WHERE id=?", (project["id"],))
         st.warning("Project deleted.")
 
     if c3.button("Clear"):
@@ -230,11 +211,10 @@ with tab_editor:
 
 
 # ----------------------------------------------------------
-#                TAB: DASHBOARD
+# TAB: DASHBOARD
 # ----------------------------------------------------------
 
 with tab_dashboard:
-
     st.markdown("## Dashboard")
 
     colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
@@ -252,8 +232,8 @@ with tab_dashboard:
     search_f = colF6.text_input("Search")
 
     filters = dict(
-        pillar=pillar_f, status=status_f,
-        owner=owner_f, priority=priority_f, search=search_f
+        pillar=pillar_f, status=status_f, owner=owner_f,
+        priority=priority_f, search=search_f
     )
 
     data = fetch_df(filters)
@@ -269,70 +249,28 @@ with tab_dashboard:
     years = ["All"] + sorted(data[year_col].dropna().astype(int).unique().tolist())
     year_f = rc2.selectbox("Year", years)
 
-    top_n = rc3.slider("Top N per Pillar", 1, 10, 5)
-    show_all = rc4.checkbox("Show ALL Reports", True)
-
-    if not show_all:
-        show_kpi = rc4.checkbox("KPI Cards", True)
-        show_chart = rc4.checkbox("Pillar Status Chart", True)
-        show_table = rc4.checkbox("Projects Table", True)
-    else:
-        show_kpi = show_chart = show_table = True
-
     if year_f != "All":
         data = data[data[year_col] == int(year_f)]
 
-    if show_kpi:
-        st.markdown("---")
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Projects", len(data))
-        k2.metric("Completed", (data["status"].str.lower() == "done").sum())
-        k3.metric("Ongoing", (data["status"].str.lower() != "done").sum())
-        k4.metric("Distinct Pillars", data["pillar"].nunique())
-
-    if show_chart:
-        st.markdown("---")
-        df = data.copy()
-        df["state"] = df["status"].apply(
-            lambda x: "Completed" if str(x).lower() == "done" else "Ongoing"
-        )
-        summary = df.groupby(["pillar", "state"]).size().reset_index(name="count")
-
-        if not summary.empty:
-            fig = px.bar(
-                summary,
-                x="pillar",
-                y="count",
-                color="state",
-                barmode="group",
-                title="Projects by Pillar — Completed vs Ongoing",
-            )
-            st.plotly_chart(fig, use_container_width=True)
+    top_n = rc3.slider("Top N per Pillar", 1, 10, 5)
 
     st.markdown("---")
     st.subheader(f"Top {top_n} Projects per Pillar")
 
-    top_df = (
-        data.sort_values("priority")
-        .groupby("pillar")
-        .head(top_n)
-    )
+    top_df = data.sort_values("priority").groupby("pillar").head(top_n)
 
     st.dataframe(top_df.style.applymap(highlight_priority, subset=["priority"]),
                  use_container_width=True)
 
-    if show_table:
-        st.markdown("---")
-        st.subheader("Projects")
+    st.markdown("---")
+    st.subheader("Projects")
 
-        st.dataframe(
-            data.style.applymap(highlight_priority, subset=["priority"]),
-            use_container_width=True
-        )
+    st.dataframe(data.style.applymap(highlight_priority, subset=["priority"]),
+                 use_container_width=True)
 
 
 # ----------------------------------------------------------
-#                TAB: ROADMAP
+# TAB: ROADMAP
 # ----------------------------------------------------------
 
 with tab_roadmap:
