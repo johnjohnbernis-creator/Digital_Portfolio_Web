@@ -34,12 +34,11 @@ def safe_migrate():
         if not cur.fetchone():
             cur.execute("ALTER TABLE projects ADD COLUMN progress_status TEXT DEFAULT '';")
 
-        # Add last_update_by column
+        # Add last update fields
         cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='last_update_by';")
         if not cur.fetchone():
             cur.execute("ALTER TABLE projects ADD COLUMN last_update_by TEXT DEFAULT '';")
 
-        # Add last_update_at column
         cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='last_update_at';")
         if not cur.fetchone():
             cur.execute("ALTER TABLE projects ADD COLUMN last_update_at TEXT DEFAULT '';")
@@ -47,7 +46,7 @@ def safe_migrate():
 safe_migrate()
 
 
-# ---------- Update History Table ----------
+# ---------- Create update history table ----------
 def migrate_updates_table():
     with conn() as c:
         cur = c.cursor()
@@ -97,8 +96,7 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
         return pd.read_sql_query(q, c, params=args)
 
 
-def distinct_values(col: str) -> List[str]:
-    with conn() as c:
+def distinct_values(col: str) -> Listwith conn() as c:
         df = pd.read_sql_query(
             f"""
             SELECT DISTINCT {col}
@@ -111,18 +109,15 @@ def distinct_values(col: str) -> List[str]:
     return df[col].dropna().astype(str).tolist()
 
 
-# ---------- Priority & Progress Colors ----------
+# ---------- Priority / Progress Color ----------
 def priority_color(p):
     try:
         p = int(p)
     except:
         return "grey"
-    if p == 1:
-        return "red"
-    if p in (2, 3):
-        return "orange"
-    if p in (4, 5, 6):
-        return "gold"
+    if p == 1: return "red"
+    if p in (2, 3): return "orange"
+    if p in (4, 5, 6): return "gold"
     return "green"
 
 
@@ -131,15 +126,13 @@ def progress_color(p):
         p = int(p)
     except:
         return "gray"
-    if p <= 30:
-        return "red"
-    if p <= 70:
-        return "gold"
+    if p <= 30: return "red"
+    if p <= 70: return "gold"
     return "green"
 
 
 # ----------------------------------------------------------
-#                STREAMLIT APP
+#                STREAMLIT UI
 # ----------------------------------------------------------
 
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
@@ -157,6 +150,7 @@ if not os.path.exists(DB_PATH):
 tab_editor, tab_dashboard, tab_roadmap = st.tabs(
     ["🛠 Editor", "📊 Dashboard", "🗺 Roadmap"]
 )
+
 
 # ----------------------------------------------------------
 #                   TAB: EDITOR
@@ -191,10 +185,9 @@ with tab_editor:
         )
 
     else:
-        # SAFE LOAD
         pid_row = existing[existing["name"] == selected]
         if pid_row.empty:
-            st.warning("The selected project no longer exists. Refreshing…")
+            st.warning("Project record missing…")
             st.rerun()
 
         pid = pid_row.iloc[0]["id"]
@@ -203,12 +196,12 @@ with tab_editor:
             df = pd.read_sql_query("SELECT * FROM projects WHERE id=?", c, params=[pid])
 
         if df.empty:
-            st.warning("Project record missing. Refreshing…")
+            st.warning("Project record missing…")
             st.rerun()
 
         project = df.iloc[0].to_dict()
 
-    # ---------- Date Parse ----------
+    # ---------- Parse Dates ----------
     def parse_date(d):
         try:
             return datetime.strptime(str(d), "%Y-%m-%d").date()
@@ -240,7 +233,7 @@ with tab_editor:
             disabled=True
         )
 
-    # Clean data
+    # Cleaned
     start_str = start_date.strftime("%Y-%m-%d")
     due_str = due_date.strftime("%Y-%m-%d")
 
@@ -253,14 +246,6 @@ with tab_editor:
 
     # SAVE
     if c1.button("New / Save"):
-        if not name.strip():
-            st.error("Name is required.")
-            st.stop()
-
-        if not pillar_clean:
-            st.error("Pillar is required.")
-            st.stop()
-
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         tag = f"Updated on {now}" if project["id"] else f"Created on {now}"
 
@@ -279,8 +264,6 @@ with tab_editor:
                         now, now, progress, tag, owner_clean, now
                     )
                 )
-                st.success("Project added.")
-
             else:
                 c.execute(
                     """
@@ -297,13 +280,16 @@ with tab_editor:
                         project["id"]
                     )
                 )
-                st.success("Project updated.")
+
+        st.success("Project saved.")
+        st.rerun()
 
     # DELETE
     if c2.button("Delete") and selected != "New Project":
         with conn() as c:
             c.execute("DELETE FROM projects WHERE id=?", (project["id"],))
         st.warning("Project deleted.")
+        st.rerun()
 
     # CLEAR
     if c3.button("Clear"):
@@ -311,7 +297,69 @@ with tab_editor:
 
 
     # ----------------------------------------------------------
-    # LOG UPDATE PANEL (only if project exists)
+    # EXTRA ACTION BUTTONS  (RECREATED FROM YOUR SCREENSHOT)
+    # ----------------------------------------------------------
+    c4, c5, c6 = st.columns(3)
+
+    # Update button
+    if c4.button("Update"):
+        if not project.get("id"):
+            st.warning("Select a project first.")
+        else:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            auto_tag = f"Updated on {now}"
+
+            with conn() as c:
+                c.execute(
+                    """
+                    UPDATE projects
+                    SET name=?, pillar=?, priority=?, description=?, owner=?, status=?,
+                        start_date=?, due_date=?, updated_at=?, progress=?, progress_status=?,
+                        last_update_by=?, last_update_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        name, pillar_clean, priority, description, owner_clean,
+                        status_clean, start_str, due_str,
+                        now, progress, auto_tag, owner_clean, now,
+                        project["id"]
+                    )
+                )
+            st.success("Project updated.")
+            st.rerun()
+
+    # Report & Roadmap button
+    if c5.button("Report & Roadmap"):
+        st.session_state["active_tab"] = "dashboard"
+        st.rerun()
+
+    # Export CSV (single project)
+    if c6.button("Export CSV"):
+        if not project.get("id"):
+            st.warning("No project selected.")
+        else:
+            with conn() as c:
+                hist = pd.read_sql_query(
+                    """
+                    SELECT at, by_user, progress, status, start_date, due_date, note
+                    FROM project_updates
+                    WHERE project_id=?
+                    ORDER BY at DESC
+                    """,
+                    c,
+                    params=[project["id"]]
+                )
+
+            st.download_button(
+                label="Download Project CSV",
+                data=hist.to_csv(index=False),
+                file_name=f"{project['name']}_history.csv",
+                mime="text/csv"
+            )
+
+
+    # ----------------------------------------------------------
+    # LOG UPDATE PANEL
     # ----------------------------------------------------------
     if project.get("id"):
         st.markdown("## Log an Update")
@@ -321,18 +369,8 @@ with tab_editor:
         update_by = u2.text_input("Updated By", value=project.get("owner", ""))
 
         cU1, cU2, cU3, cU4 = st.columns(4)
-
-        update_progress = cU1.slider(
-            "Progress (%)", 0, 100,
-            int(project.get("progress", 0))
-        )
-
-        update_status = cU2.selectbox(
-            "Status (optional override)",
-            [""] + distinct_values("status"),
-            index=0
-        )
-
+        update_progress = cU1.slider("Progress (%)", 0, 100, int(project.get("progress", 0)))
+        update_status = cU2.selectbox("Status (optional override)", [""] + distinct_values("status"))
         update_start = cU3.date_input("Start Date (optional)", value=start_val)
         update_due = cU4.date_input("Due Date (optional)", value=due_val)
 
@@ -341,7 +379,7 @@ with tab_editor:
 
             with conn() as c:
 
-                # Insert update history entry
+                # insert history row
                 c.execute(
                     """
                     INSERT INTO project_updates
@@ -357,12 +395,12 @@ with tab_editor:
                     )
                 )
 
-                # Sync latest update back to project table
+                # sync to project table
                 auto_tag = f"Updated on {now}"
                 c.execute(
                     """
                     UPDATE projects
-                    SET progress=?,
+                    SET progress=?, 
                         status=COALESCE(?, status),
                         start_date=COALESCE(?, start_date),
                         due_date=COALESCE(?, due_date),
@@ -389,6 +427,7 @@ with tab_editor:
     # UPDATE HISTORY VIEWER
     # ----------------------------------------------------------
     if project.get("id"):
+
         with conn() as c:
             hist = pd.read_sql_query(
                 """
@@ -412,15 +451,14 @@ with tab_editor:
 # ----------------------------------------------------------
 # TAB: DASHBOARD
 # ----------------------------------------------------------
-
 with tab_dashboard:
 
     st.markdown("## Dashboard")
 
-    # ---------- EXPORT BLOCK ----------
+    # ---------- EXPORT ALL PROJECTS + HISTORY ----------
     st.markdown("### Export Projects + Update History")
 
-    if st.button("Download CSV Export"):
+    if st.button("Download Full CSV Export"):
         with conn() as c:
             projects = pd.read_sql_query("SELECT * FROM projects", c)
             history = pd.read_sql_query("SELECT * FROM project_updates", c)
@@ -439,14 +477,13 @@ with tab_dashboard:
             mime="text/csv"
         )
 
-    # (Dashboard contents continue unchanged…)
-    # ----------------------------------------------------------
+    # (Your Dashboard content stays the same here)
+
 
 
 # ----------------------------------------------------------
 # TAB: ROADMAP
 # ----------------------------------------------------------
-
 with tab_roadmap:
 
     st.markdown("## Roadmap")
