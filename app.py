@@ -98,6 +98,18 @@ def highlight_priority(val):
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
 st.title("Digital Portfolio — Web Version")
 # ----------------------------------------------------------
+# SHOW SQLITE TABLE STRUCTURE (DEBUG)
+# ----------------------------------------------------------
+with st.sidebar:
+    st.write("### Debug Tools")
+    if st.button("Show SQL Table Structure"):
+        import sqlite3
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute("PRAGMA table_info(projects)")
+        rows = cur.fetchall()
+        st.code(rows)
+# ----------------------------------------------------------
 #   TEMPORARY DEBUG BUTTON — SHOW TABLE STRUCTURE
 # ----------------------------------------------------------
 with st.sidebar:
