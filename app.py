@@ -295,6 +295,9 @@ with tab_editor:
 with tab_dashboard:
     st.markdown("## Dashboard")
 
+    # -----------------------------------------------
+    # TOP FILTER BAR
+    # -----------------------------------------------
     colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
 
     pillars = ["All"] + distinct_values("pillar")
@@ -308,6 +311,7 @@ with tab_dashboard:
     owner_f = colF3.selectbox("Owner", owners)
     priority_f = colF4.selectbox("Priority", priority_opts)
     search_f = colF6.text_input("Search")
+    show_all = colF5.checkbox("Show ALL Reports", value=True)
 
     filters = dict(
         pillar=pillar_f,
@@ -319,8 +323,85 @@ with tab_dashboard:
 
     data = fetch_df(filters)
 
+    # -----------------------------------------------
+    # YEAR FILTER BLOCK
+    # -----------------------------------------------
+    st.markdown("### ")
+
+    colY1, colY2, colY3, _ = st.columns([1, 1, 2, 2])
+
+    year_mode = colY1.radio("Year Type", ["Start Year", "Due Year"])
+    year_col = "start_date" if year_mode == "Start Year" else "due_date"
+
+    data["year"] = pd.to_datetime(data[year_col], errors="coerce").dt.year
+    years = ["All"] + sorted(data["year"].dropna().astype(int).unique().tolist())
+    year_f = colY2.selectbox("Year", years)
+
+    if year_f != "All":
+        data = data[data["year"] == int(year_f)]
+
+    top_n = colY3.slider("Top N per Pillar", 1, 10, 5)
+
     st.markdown("---")
-    st.subheader("Projects Overview")
+
+    # -----------------------------------------------
+    # METRIC COUNTERS (Option C Logic)
+    # -----------------------------------------------
+
+    data["is_completed"] = (data["status"] == "Completed") & (data["progress"] == 100)
+    data["is_ongoing"] = ~data["is_completed"]
+
+    colM1, colM2, colM3, colM4 = st.columns(4)
+
+    colM1.metric("Projects", len(data))
+    colM2.metric("Completed", int(data["is_completed"].sum()))
+    colM3.metric("Ongoing", int(data["is_ongoing"].sum()))
+    colM4.metric("Distinct Pillars", data["pillar"].nunique())
+
+    st.markdown("---")
+
+    # -----------------------------------------------
+    # BAR CHART - Completed vs Ongoing by Pillar
+    # -----------------------------------------------
+
+    by_pillar = (
+        data.groupby(["pillar", "is_completed"])
+        .size()
+        .reset_index(name="count")
+    )
+
+    by_pillar["Status"] = by_pillar["is_completed"].map(
+        {True: "Completed", False: "Ongoing"}
+    )
+
+    if not by_pillar.empty:
+        fig1 = px.bar(
+            by_pillar,
+            x="pillar",
+            y="count",
+            color="Status",
+            barmode="group",
+            title="Projects by Pillar — Completed vs Ongoing"
+        )
+        st.plotly_chart(fig1, use_container_width=True)
+
+    # -----------------------------------------------
+    # TOP N PROJECTS PER PILLAR (by priority)
+    # -----------------------------------------------
+
+    st.markdown("### Top Projects per Pillar")
+    top_df = data.sort_values("priority").groupby("pillar").head(top_n)
+
+    st.dataframe(
+        top_df[["name", "pillar", "priority", "status", "progress"]],
+        use_container_width=True
+    )
+
+    st.markdown("---")
+
+    # -----------------------------------------------
+    # DETAILED PROJECT TABLE WITH PROGRESS BARS
+    # -----------------------------------------------
 
     # HTML progress bar
     def render_progress_bar(p):
@@ -336,6 +417,8 @@ with tab_dashboard:
 
     data["Progress Bar"] = data["progress"].apply(render_progress_bar)
 
+    st.markdown("### All Projects")
+
     st.write(
         data[
             [
@@ -345,7 +428,6 @@ with tab_dashboard:
         ].to_html(escape=False),
         unsafe_allow_html=True
     )
-
 
 # ----------------------------------------------------------
 # TAB: ROADMAP
