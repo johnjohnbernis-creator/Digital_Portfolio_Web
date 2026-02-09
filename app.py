@@ -60,7 +60,7 @@ def bootstrap_db(seed: bool = True) -> None:
             );
             """
         )
-        # Useful indexes for snappier filtering
+        # Helpful indexes for snappier filtering
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_pillar ON {TABLE}(pillar);")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_status ON {TABLE}(status);")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_owner ON {TABLE}(owner);")
@@ -209,10 +209,12 @@ with st.sidebar:
         else:
             st.info("Table does not exist yet.")
 
-# If DB file didn’t exist, but user hasn’t bootstrapped yet, still allow viewing the UI,
-# but editing will error-out until table exists. We’ll hint the user.
+# Gentle hint if table missing
 if not ensure_table():
-    st.info("The application is ready. Click **Bootstrap table** from the sidebar to create the schema and (optionally) seed sample data.")
+    st.info(
+        "The application is ready. Click **Bootstrap table** from the sidebar to create "
+        "the schema and (optionally) seed sample data."
+    )
 
 # ----------------------------------------------------------
 #                      TABS
