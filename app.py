@@ -161,7 +161,7 @@ with tab_editor:
 
         if pid_row.empty:
             st.warning("The selected project no longer exists. Refreshing…")
-            st.experimental_rerun()
+            st.rerun()   # <<< FIXED
 
         pid = pid_row.iloc[0]["id"]
 
@@ -170,7 +170,7 @@ with tab_editor:
 
         if df.empty:
             st.warning("Project record missing. Refreshing…")
-            st.experimental_rerun()
+            st.rerun()   # <<< FIXED
 
         project = df.iloc[0].to_dict()
 
@@ -266,7 +266,8 @@ with tab_editor:
         st.warning("Project deleted.")
 
     if c3.button("Clear"):
-        st.experimental_rerun()
+        st.rerun()   # <<< FIXED
+
 
 # ----------------------------------------------------------
 # TAB: DASHBOARD
@@ -298,7 +299,10 @@ with tab_dashboard:
             mime="text/csv"
         )
 
-    # ---------- FILTERS ----------
+    # ----------------------------------------------------
+    # Dashboard continues unchanged...
+    # ----------------------------------------------------
+
     colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
 
     pillars = ["All"] + distinct_values("pillar")
@@ -324,16 +328,15 @@ with tab_dashboard:
 
     data = fetch_df(filters)
 
-    # ---------- YEAR FILTER ----------
     st.markdown("### ")
 
     colY1, colY2, colY3, _ = st.columns([1, 1, 2, 2])
-
     year_mode = colY1.radio("Year Type", ["Start Year", "Due Year"])
     year_col = "start_date" if year_mode == "Start Year" else "due_date"
 
     data["year"] = pd.to_datetime(data[year_col], errors="coerce").dt.year
-    years = ["All"] + sorted(data["year"].dropna().astype(int).unique().tolist())
+    years = ["All"] + sorted(data["year"].dropna().astype(int).unique().tolist()
+)
     year_f = colY2.selectbox("Year", years)
 
     if year_f != "All":
@@ -343,7 +346,6 @@ with tab_dashboard:
 
     st.markdown("---")
 
-    # ---------- METRICS ----------
     data["is_completed"] = (data["status"] == "Completed") & (data["progress"] == 100)
     data["is_ongoing"] = ~data["is_completed"]
 
@@ -355,13 +357,11 @@ with tab_dashboard:
 
     st.markdown("---")
 
-    # ---------- BAR CHART ----------
     by_pillar = (
         data.groupby(["pillar", "is_completed"])
         .size()
         .reset_index(name="count")
     )
-
     by_pillar["Status"] = by_pillar["is_completed"].map(
         {True: "Completed", False: "Ongoing"}
     )
@@ -377,7 +377,6 @@ with tab_dashboard:
         )
         st.plotly_chart(fig1, use_container_width=True)
 
-    # ---------- TOP N TABLE ----------
     st.markdown("### Top Projects per Pillar")
     top_df = data.sort_values("priority").groupby("pillar").head(top_n)
 
@@ -388,7 +387,6 @@ with tab_dashboard:
 
     st.markdown("---")
 
-    # ---------- DETAILED TABLE ----------
     def render_progress_bar(p):
         color = progress_color(p)
         return f"""
