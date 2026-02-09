@@ -92,7 +92,7 @@ def highlight_priority(val):
 
 
 # ----------------------------------------------------------
-#                   STREAMLIT APP
+#                STREAMLIT APP
 # ----------------------------------------------------------
 
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
@@ -103,7 +103,7 @@ if not os.path.exists(DB_PATH):
     st.stop()
 
 # ----------------------------------------------------------
-#        SINGLE CLEAN TABLE STRUCTURE DEBUG BUTTON
+#  SINGLE DEBUG BUTTON — SHOW TABLE STRUCTURE
 # ----------------------------------------------------------
 
 with st.sidebar:
@@ -162,7 +162,6 @@ with tab_editor:
             )
         project = df.iloc[0].to_dict()
 
-    # Parse dates defaulting to today
     def parse_date(d):
         try:
             return datetime.strptime(str(d), "%Y-%m-%d").date()
@@ -172,7 +171,6 @@ with tab_editor:
     start_val = parse_date(project.get("start_date"))
     due_val = parse_date(project.get("due_date"))
 
-    # ---------- FORM UI ----------
     colA, colB = st.columns([2, 2])
 
     with colA:
@@ -180,7 +178,6 @@ with tab_editor:
         pillar = st.selectbox("Pillar*", [""] + distinct_values("pillar"))
         priority = st.number_input("Priority", 1, 10, int(project["priority"] or 1))
 
-        # Color indicator
         st.markdown(
             f"<span style='color:{priority_color(priority)}; font-size:22px;'>●</span> "
             f"<span style='color:{priority_color(priority)}; font-weight:bold;'>Priority Level</span>",
@@ -198,7 +195,6 @@ with tab_editor:
     start_str = start_date.strftime("%Y-%m-%d")
     due_str = due_date.strftime("%Y-%m-%d")
 
-    # ---------- CRUD BUTTONS ----------
     c1, c2, c3 = st.columns(3)
 
     # SAVE / UPDATE
@@ -229,13 +225,12 @@ with tab_editor:
             c.execute(f"DELETE FROM {TABLE} WHERE id=?", (project["id"],))
         st.warning("Project deleted.")
 
-    # CLEAR
     if c3.button("Clear"):
         st.experimental_rerun()
 
 
 # ----------------------------------------------------------
-#                  TAB: DASHBOARD
+#                TAB: DASHBOARD
 # ----------------------------------------------------------
 
 with tab_dashboard:
@@ -287,7 +282,6 @@ with tab_dashboard:
     if year_f != "All":
         data = data[data[year_col] == int(year_f)]
 
-    # KPI CARDS
     if show_kpi:
         st.markdown("---")
         k1, k2, k3, k4 = st.columns(4)
@@ -296,7 +290,6 @@ with tab_dashboard:
         k3.metric("Ongoing", (data["status"].str.lower() != "done").sum())
         k4.metric("Distinct Pillars", data["pillar"].nunique())
 
-    # CHART
     if show_chart:
         st.markdown("---")
         df = data.copy()
@@ -316,7 +309,6 @@ with tab_dashboard:
             )
             st.plotly_chart(fig, use_container_width=True)
 
-    # TOP N
     st.markdown("---")
     st.subheader(f"Top {top_n} Projects per Pillar")
 
@@ -326,12 +318,9 @@ with tab_dashboard:
         .head(top_n)
     )
 
-    st.dataframe(
-        top_df.style.applymap(highlight_priority, subset=["priority"]),
-        use_container_width=True
-    )
+    st.dataframe(top_df.style.applymap(highlight_priority, subset=["priority"]),
+                 use_container_width=True)
 
-    # FULL PROJECT TABLE
     if show_table:
         st.markdown("---")
         st.subheader("Projects")
@@ -343,7 +332,7 @@ with tab_dashboard:
 
 
 # ----------------------------------------------------------
-#                   TAB: ROADMAP
+#                TAB: ROADMAP
 # ----------------------------------------------------------
 
 with tab_roadmap:
