@@ -22,8 +22,7 @@ def conn() -> sqlite3.Connection:
 
 def ensure_table() -> bool:
     """
-    Ensure the projects table exists. Returns True if it exists (after check),
-    False if it does not exist.
+    Returns True if the projects table exists, False otherwise.
     """
     try:
         with conn() as c:
@@ -40,8 +39,8 @@ def ensure_table() -> bool:
 
 def bootstrap_db(seed: bool = True) -> None:
     """
-    Create the projects table if it doesn't exist.
-    Optionally seed a few example rows to get started.
+    Create the projects table (and helpful indexes) if it doesn't exist.
+    Optionally seed a few example rows.
     """
     with conn() as c:
         cur = c.cursor()
@@ -60,7 +59,7 @@ def bootstrap_db(seed: bool = True) -> None:
             );
             """
         )
-        # Helpful indexes for snappier filtering
+        # Helpful indexes for faster filtering
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_pillar ON {TABLE}(pillar);")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_status ON {TABLE}(status);")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_owner ON {TABLE}(owner);")
@@ -108,7 +107,7 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
       - pillar/status/owner: exact match (except "All")
       - priority: numeric/text compatible filter (except "All")
       - search: matches name/description (case-insensitive)
-    Sorted by start_date then due_date; empty strings used to keep NULLs last.
+    Sorted by start_date then due_date; empty strings keep NULLs last.
     """
     q = f"SELECT * FROM {TABLE}"
     args: List[Any] = []
@@ -209,7 +208,7 @@ with st.sidebar:
         else:
             st.info("Table does not exist yet.")
 
-# Gentle hint if table missing
+# Hint if table missing
 if not ensure_table():
     st.info(
         "The application is ready. Click **Bootstrap table** from the sidebar to create "
