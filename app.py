@@ -287,11 +287,58 @@ with tab_editor:
     if c3.button("Clear"):
         st.experimental_rerun()
 
+# ----------------------------------------------------------
+# TAB: DASHBOARD EXPORT (Projects + Update History)
+# ----------------------------------------------------------
 
+st.markdown("### Export Projects + Update History")
+
+if st.button("Download CSV Export"):
+    with conn() as c:
+        projects = pd.read_sql_query("SELECT * FROM projects", c)
+        history  = pd.read_sql_query("SELECT * FROM project_updates", c)
+
+    # Merge history entries with main project info
+    merged = history.merge(
+        projects,
+        left_on="project_id",
+        right_on="id",
+        suffixes=("_update", "_project")
+    )
+
+    merged.to_csv("portfolio_with_updates.csv", index=False)
+
+    st.download_button(
+        label="Download .csv",
+        data=merged.to_csv(index=False),
+        file_name="portfolio_with_update_history.csv",
+        mime="text/csv"
+    )
 # ----------------------------------------------------------
 # TAB: DASHBOARD
 # ----------------------------------------------------------
+st.markdown("### Export Projects + Update History")
 
+if st.button("Download CSV Export"):
+    with conn() as c:
+        projects = pd.read_sql_query("SELECT * FROM projects", c)
+        history = pd.read_sql_query("SELECT * FROM project_updates", c)
+
+    merged = history.merge(
+        projects,
+        left_on="project_id",
+        right_on="id",
+        suffixes=("_update", "_project")
+    )
+
+    merged.to_csv("portfolio_with_updates.csv", index=False)
+
+    st.download_button(
+        label="Download .csv",
+        data=merged.to_csv(index=False),
+        file_name="portfolio_with_update_history.csv",
+        mime="text/csv"
+    )
 with tab_dashboard:
     st.markdown("## Dashboard")
 
