@@ -166,13 +166,26 @@ with tab_editor:
             progress=0,
             progress_status=""
         )
-    else:
-        pid = existing[existing["name"] == selected].iloc[0]["id"]
+   else:
+        # Find project row safely
+        pid_row = existing[existing["name"] == selected]
+
+        # If project not found → UI and DB out of sync
+        if pid_row.empty:
+            st.warning("The selected project no longer exists. Refreshing…")
+            st.experimental_rerun()
+
+        pid = pid_row.iloc[0]["id"]
+
+        # Fetch project safely
         with conn() as c:
             df = pd.read_sql_query("SELECT * FROM projects WHERE id=?", c, params=[pid])
-        project = df.iloc[0].to_dict()
 
-    def parse_date(d):
+        if df.empty:
+            st.warning("Project record missing in database. Refreshing…")
+            st.experimental_rerun()
+
+        project = df.iloc[0].to_dict()
         try:
             return datetime.strptime(str(d), "%Y-%m-%d").date()
         except:
