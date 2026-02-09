@@ -24,29 +24,30 @@ def safe_migrate():
     with conn() as c:
         cur = c.cursor()
 
-        # Add progress column
-        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='progress';")
+        # Add progress
+        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='progress'")
         if not cur.fetchone():
-            cur.execute("ALTER TABLE projects ADD COLUMN progress INTEGER DEFAULT 0;")
+            cur.execute("ALTER TABLE projects ADD COLUMN progress INTEGER DEFAULT 0")
 
-        # Add progress_status column
-        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='progress_status';")
+        # Add progress_status
+        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='progress_status'")
         if not cur.fetchone():
-            cur.execute("ALTER TABLE projects ADD COLUMN progress_status TEXT DEFAULT '';")
+            cur.execute("ALTER TABLE projects ADD COLUMN progress_status TEXT DEFAULT ''")
 
-        # Add last update fields
-        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='last_update_by';")
+        # Add last_update_by
+        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='last_update_by'")
         if not cur.fetchone():
-            cur.execute("ALTER TABLE projects ADD COLUMN last_update_by TEXT DEFAULT '';")
+            cur.execute("ALTER TABLE projects ADD COLUMN last_update_by TEXT DEFAULT ''")
 
-        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='last_update_at';")
+        # Add last_update_at
+        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='last_update_at'")
         if not cur.fetchone():
-            cur.execute("ALTER TABLE projects ADD COLUMN last_update_at TEXT DEFAULT '';")
+            cur.execute("ALTER TABLE projects ADD COLUMN last_update_at TEXT DEFAULT ''")
 
 safe_migrate()
 
 
-# ---------- Create update history table ----------
+# ---------- Update History Table ----------
 def migrate_updates_table():
     with conn() as c:
         cur = c.cursor()
@@ -74,9 +75,10 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
 
     if filters:
         for col in ["pillar", "status", "owner"]:
-            if filters.get(col) and filters[col] != "All":
+            v = filters.get(col)
+            if v and v != "All":
                 where.append(f"{col} = ?")
-                args.append(filters[col])
+                args.append(v)
 
         if filters.get("priority") and filters["priority"] != "All":
             where.append("CAST(priority AS TEXT) = ?")
@@ -96,7 +98,9 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
         return pd.read_sql_query(q, c, params=args)
 
 
-def distinct_values(col: str) -> Listwith conn() as c:
+def distinct_values(col: str) -> List[str]:
+    """Return unique values from a single column."""
+    with conn() as c:
         df = pd.read_sql_query(
             f"""
             SELECT DISTINCT {col}
@@ -109,12 +113,12 @@ def distinct_values(col: str) -> Listwith conn() as c:
     return df[col].dropna().astype(str).tolist()
 
 
-# ---------- Priority / Progress Color ----------
+# ---------- Color Helpers ----------
 def priority_color(p):
     try:
         p = int(p)
     except:
-        return "grey"
+        return "gray"
     if p == 1: return "red"
     if p in (2, 3): return "orange"
     if p in (4, 5, 6): return "gold"
@@ -132,7 +136,7 @@ def progress_color(p):
 
 
 # ----------------------------------------------------------
-#                STREAMLIT UI
+#                STREAMLIT APP
 # ----------------------------------------------------------
 
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
@@ -146,6 +150,9 @@ if not os.path.exists(DB_PATH):
 # ----------------------------------------------------------
 #                      TABS
 # ----------------------------------------------------------
+
+if "active_tab" not in st.session_state:
+    st.session_state["active_tab"] = "editor"
 
 tab_editor, tab_dashboard, tab_roadmap = st.tabs(
     ["🛠 Editor", "📊 Dashboard", "🗺 Roadmap"]
@@ -161,12 +168,14 @@ with tab_editor:
     st.markdown("## Project Editor")
 
     with conn() as c:
-        existing = pd.read_sql_query(f"SELECT id, name FROM {TABLE} ORDER BY name", c)
+        existing = pd.read_sql_query(
+            f"SELECT id, name FROM {TABLE} ORDER BY name", c
+        )
 
     options = ["New Project"] + existing["name"].tolist()
     selected = st.selectbox("Select Project", options)
 
-    # ---------- New Project ----------
+    # ---------- Load or initialize ----------
     if selected == "New Project":
         project = dict(
             id=None,
@@ -183,74 +192,66 @@ with tab_editor:
             last_update_by="",
             last_update_at=""
         )
-
     else:
-        pid_row = existing[existing["name"] == selected]
-        if pid_row.empty:
-            st.warning("Project record missing…")
+        row = existing[existing["name"] == selected]
+        if row.empty:
+            st.warning("Project missing. Reloading…")
             st.rerun()
 
-        pid = pid_row.iloc[0]["id"]
+        pid = row.iloc[0]["id"]
 
         with conn() as c:
             df = pd.read_sql_query("SELECT * FROM projects WHERE id=?", c, params=[pid])
 
         if df.empty:
-            st.warning("Project record missing…")
+            st.warning("Project missing. Reloading…")
             st.rerun()
 
         project = df.iloc[0].to_dict()
 
-    # ---------- Parse Dates ----------
+    # ---------- Date Parsing ----------
     def parse_date(d):
-        try:
-            return datetime.strptime(str(d), "%Y-%m-%d").date()
-        except:
-            return date.today()
+        try: return datetime.strptime(str(d), "%Y-%m-%d").date()
+        except: return date.today()
 
-    start_val = parse_date(project.get("start_date"))
-    due_val = parse_date(project.get("due_date"))
+    start_val = parse_date(project["start_date"])
+    due_val = parse_date(project["due_date"])
 
-    # ---------- Form Layout ----------
-    colA, colB = st.columns([2, 2])
+    # ---------- Form ----------
+    colA, colB = st.columns(2)
 
     with colA:
         name = st.text_input("Name*", project["name"])
         pillar = st.selectbox("Pillar*", [""] + distinct_values("pillar"))
-        priority = st.number_input("Priority", 1, 10, int(project["priority"] or 1))
-        description = st.text_area("Description", project.get("description", ""))
+        priority = st.number_input("Priority", 1, 10, int(project["priority"]))
+        description = st.text_area("Description", project["description"])
 
     with colB:
-        owner = st.text_input("Owner", project.get("owner", ""))
+        owner = st.text_input("Owner", project["owner"])
         status = st.selectbox("Status", [""] + distinct_values("status"))
         start_date = st.date_input("Start Date", value=start_val)
         due_date = st.date_input("Due Date", value=due_val)
-        progress = st.slider("Progress (%)", 0, 100, int(project.get("progress", 0)))
+        progress = st.slider("Progress (%)", 0, 100, int(project["progress"]))
 
-        st.text_input(
-            "Update Tag (automatic)",
-            project.get("progress_status", ""),
-            disabled=True
-        )
+        st.text_input("Update Tag (auto)", project["progress_status"], disabled=True)
 
-    # Cleaned
+    # ---------- Clean values ----------
     start_str = start_date.strftime("%Y-%m-%d")
     due_str = due_date.strftime("%Y-%m-%d")
+    pillar_clean = pillar or None
+    status_clean = status or None
+    owner_clean = owner or None
 
-    pillar_clean = pillar.strip() or None
-    status_clean = status.strip() or None
-    owner_clean = owner.strip() or None
-
-    # ---------- Buttons ----------
+    # ---------- Action Buttons ----------
     c1, c2, c3 = st.columns(3)
 
-    # SAVE
+    # --- SAVE ---
     if c1.button("New / Save"):
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         tag = f"Updated on {now}" if project["id"] else f"Created on {now}"
 
         with conn() as c:
-            if selected == "New Project":
+            if project["id"] is None:
                 c.execute(
                     """
                     INSERT INTO projects
@@ -275,35 +276,31 @@ with tab_editor:
                     """,
                     (
                         name, pillar_clean, priority, description, owner_clean,
-                        status_clean, start_str, due_str,
-                        now, progress, tag, owner_clean, now,
-                        project["id"]
+                        status_clean, start_str, due_str, now, progress, tag,
+                        owner_clean, now, project["id"]
                     )
                 )
 
         st.success("Project saved.")
         st.rerun()
 
-    # DELETE
-    if c2.button("Delete") and selected != "New Project":
+    # --- DELETE ---
+    if c2.button("Delete") and project["id"]:
         with conn() as c:
             c.execute("DELETE FROM projects WHERE id=?", (project["id"],))
-        st.warning("Project deleted.")
+        st.success("Project deleted.")
         st.rerun()
 
-    # CLEAR
+    # --- CLEAR ---
     if c3.button("Clear"):
         st.rerun()
 
-
-    # ----------------------------------------------------------
-    # EXTRA ACTION BUTTONS  (RECREATED FROM YOUR SCREENSHOT)
-    # ----------------------------------------------------------
+    # ---------- EXTRA BUTTON ROW ----------
     c4, c5, c6 = st.columns(3)
 
-    # Update button
+    # --- UPDATE (quick save) ---
     if c4.button("Update"):
-        if not project.get("id"):
+        if not project["id"]:
             st.warning("Select a project first.")
         else:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -320,22 +317,22 @@ with tab_editor:
                     """,
                     (
                         name, pillar_clean, priority, description, owner_clean,
-                        status_clean, start_str, due_str,
-                        now, progress, auto_tag, owner_clean, now,
-                        project["id"]
+                        status_clean, start_str, due_str, now, progress, auto_tag,
+                        owner_clean, now, project["id"]
                     )
                 )
+
             st.success("Project updated.")
             st.rerun()
 
-    # Report & Roadmap button
+    # --- REPORT & ROADMAP ---
     if c5.button("Report & Roadmap"):
         st.session_state["active_tab"] = "dashboard"
         st.rerun()
 
-    # Export CSV (single project)
+    # --- Export CSV for single project ---
     if c6.button("Export CSV"):
-        if not project.get("id"):
+        if not project["id"]:
             st.warning("No project selected.")
         else:
             with conn() as c:
@@ -357,29 +354,28 @@ with tab_editor:
                 mime="text/csv"
             )
 
-
     # ----------------------------------------------------------
     # LOG UPDATE PANEL
     # ----------------------------------------------------------
-    if project.get("id"):
+    if project["id"]:
         st.markdown("## Log an Update")
 
-        u1, u2 = st.columns([3, 1])
-        update_note = u1.text_area("Update Note", placeholder="Describe what changed…")
-        update_by = u2.text_input("Updated By", value=project.get("owner", ""))
+        col1, col2 = st.columns([3, 1])
+        update_note = col1.text_area("Update Note", placeholder="Describe what changed…")
+        update_by = col2.text_input("Updated By", value=project["owner"])
 
-        cU1, cU2, cU3, cU4 = st.columns(4)
-        update_progress = cU1.slider("Progress (%)", 0, 100, int(project.get("progress", 0)))
-        update_status = cU2.selectbox("Status (optional override)", [""] + distinct_values("status"))
-        update_start = cU3.date_input("Start Date (optional)", value=start_val)
-        update_due = cU4.date_input("Due Date (optional)", value=due_val)
+        uA, uB, uC, uD = st.columns(4)
+        update_progress = uA.slider("Progress (%)", 0, 100, int(project["progress"]))
+        update_status = uB.selectbox("Status (optional)", [""] + distinct_values("status"))
+        update_start = uC.date_input("Start (optional)", value=start_val)
+        update_due = uD.date_input("Due (optional)", value=due_val)
 
         if st.button("Log Update Entry"):
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             with conn() as c:
 
-                # insert history row
+                # Insert update history
                 c.execute(
                     """
                     INSERT INTO project_updates
@@ -391,27 +387,24 @@ with tab_editor:
                         int(update_progress),
                         update_start.strftime("%Y-%m-%d"),
                         update_due.strftime("%Y-%m-%d"),
-                        update_status if update_status else None
+                        update_status or None
                     )
                 )
 
-                # sync to project table
+                # Sync latest update into project
                 auto_tag = f"Updated on {now}"
                 c.execute(
                     """
                     UPDATE projects
-                    SET progress=?, 
-                        status=COALESCE(?, status),
+                    SET progress=?, status=COALESCE(?, status),
                         start_date=COALESCE(?, start_date),
                         due_date=COALESCE(?, due_date),
-                        progress_status=?,
-                        last_update_by=?,
-                        last_update_at=?
+                        progress_status=?, last_update_by=?, last_update_at=?
                     WHERE id=?
                     """,
                     (
                         int(update_progress),
-                        update_status if update_status else None,
+                        update_status or None,
                         update_start.strftime("%Y-%m-%d"),
                         update_due.strftime("%Y-%m-%d"),
                         auto_tag, update_by, now,
@@ -422,12 +415,8 @@ with tab_editor:
             st.success("Update logged.")
             st.rerun()
 
-
-    # ----------------------------------------------------------
-    # UPDATE HISTORY VIEWER
-    # ----------------------------------------------------------
-    if project.get("id"):
-
+    # ---------- HISTORY TABLE ----------
+    if project["id"]:
         with conn() as c:
             hist = pd.read_sql_query(
                 """
@@ -440,9 +429,9 @@ with tab_editor:
                 params=[project["id"]]
             )
 
-        with st.expander("📜 Update History (click to expand)", expanded=False):
+        with st.expander("📜 Update History"):
             if hist.empty:
-                st.info("No updates logged yet.")
+                st.info("No updates yet.")
             else:
                 st.dataframe(hist, use_container_width=True)
 
@@ -451,11 +440,12 @@ with tab_editor:
 # ----------------------------------------------------------
 # TAB: DASHBOARD
 # ----------------------------------------------------------
+
 with tab_dashboard:
 
     st.markdown("## Dashboard")
 
-    # ---------- EXPORT ALL PROJECTS + HISTORY ----------
+    # ---------- Export full CSV ----------
     st.markdown("### Export Projects + Update History")
 
     if st.button("Download Full CSV Export"):
@@ -471,19 +461,22 @@ with tab_dashboard:
         )
 
         st.download_button(
-            label="Download .csv",
-            data=merged.to_csv(index=False),
-            file_name="portfolio_with_update_history.csv",
+            "Download .csv",
+            merged.to_csv(index=False),
+            "portfolio_with_history.csv",
             mime="text/csv"
         )
 
-    # (Your Dashboard content stays the same here)
+    # (Dashboard charts continue here…)
+    # Keep your existing Dashboard code below
+
 
 
 
 # ----------------------------------------------------------
 # TAB: ROADMAP
 # ----------------------------------------------------------
+
 with tab_roadmap:
 
     st.markdown("## Roadmap")
