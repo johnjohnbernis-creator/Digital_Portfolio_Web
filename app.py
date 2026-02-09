@@ -97,6 +97,20 @@ def highlight_priority(val):
 
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
 st.title("Digital Portfolio — Web Version")
+# ----------------------------------------------------------
+#   TEMPORARY DEBUG BUTTON — SHOW TABLE STRUCTURE
+# ----------------------------------------------------------
+with st.sidebar:
+    if st.button("SHOW PROJECTS TABLE STRUCTURE"):
+        import sqlite3
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+
+        cur.execute("PRAGMA table_info(projects)")
+        rows = cur.fetchall()
+
+        st.write("### SQLite Table Columns:")
+        st.code(rows)
 
 if not os.path.exists(DB_PATH):
     st.error("Database not found.")
