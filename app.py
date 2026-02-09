@@ -12,7 +12,30 @@ import streamlit as st
 
 DB_PATH = "portfolio.db"
 TABLE = "projects"
+def conn() -> sqlite3.Connection:
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
+def safe_migrate():
+    with conn() as c:
+        cur = c.cursor()
+
+        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='progress'")
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE projects ADD COLUMN progress INTEGER DEFAULT 0")
+
+        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='progress_status'")
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE projects ADD COLUMN progress_status TEXT DEFAULT ''")
+
+        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='last_update_by'")
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE projects ADD COLUMN last_update_by TEXT DEFAULT ''")
+
+        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='last_update_at'")
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE projects ADD COLUMN last_update_at TEXT DEFAULT ''")
+
+safe_migrate()
 
 # ---------- Utilities ----------
 def conn() -> sqlite3.Connection:
@@ -46,7 +69,69 @@ def safe_migrate():
 
 safe_migrate()
 
+def migrate_updates_table():
+    with conn() as c:
+        cur = c.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS project_updates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                at TEXT NOT NULL,
+                by_user TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                progress INTEGER,
+                start_date TEXT,
+                due_date TEXT,
+                status TEXT,
+                FOREIGN KEY(project_id) REFERENCES projects(id)
+            )
+        """)
 
+migrate_updates_table()
+def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    q = f"SELECT * FROM {TABLE}"
+    args = []
+    where = []
+
+    if filters:
+        for col in ["pillar", "status", "owner"]:
+            val = filters.get(col)
+            if val and val != "All":
+                where.append(f"{col} = ?")
+                args.append(val)
+
+        if filters.get("priority") and filters["priority"] != "All":
+            where.append("CAST(priority AS TEXT) = ?")
+            args.append(str(filters["priority"]))
+
+        if filters.get("search"):
+            s = f"%{filters['search'].lower()}%"
+            where.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
+            args.extend([s, s])
+
+    if where:
+        q += " WHERE " + " AND ".join(where)
+
+    q += " ORDER BY COALESCE(start_date,''), COALESCE(due_date,'')"
+
+    with conn() as c:
+        return pd.read_sql_query(q, c, params=args)
+
+
+from typing import List
+
+def distinct_values(col: str) -> List[str]:
+    with conn() as c:
+        df = pd.read_sql_query(
+            f"""
+            SELECT DISTINCT {col}
+            FROM {TABLE}
+            WHERE {col} IS NOT NULL AND TRIM({col}) <> ''
+            ORDER BY {col}
+            """,
+            c,
+        )
+    return df[col].dropna().astype(str).tolist()
 # ---------- Update History Table ----------
 def migrate_updates_table():
     with conn() as c:
