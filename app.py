@@ -150,7 +150,6 @@ with tab_editor:
             df = pd.read_sql_query("SELECT * FROM projects WHERE id=?", c, params=[pid])
         project = df.iloc[0].to_dict()
 
-    # Date parsing
     def parse_date(d):
         try:
             return datetime.strptime(str(d), "%Y-%m-%d").date()
@@ -184,7 +183,7 @@ with tab_editor:
     start_str = start_date.strftime("%Y-%m-%d")
     due_str = due_date.strftime("%Y-%m-%d")
 
-    # Clean empty strings → None
+    # Convert blank → None
     pillar_clean = pillar if pillar.strip() else None
     status_clean = status if status.strip() else None
     owner_clean = owner if owner.strip() else None
@@ -193,26 +192,41 @@ with tab_editor:
 
     # ---- SAVE ----
     if c1.button("New / Save"):
+
+        # Required field validation
+        if not name.strip():
+            st.error("Name is required.")
+            st.stop()
+
+        if not pillar_clean:
+            st.error("Pillar is required.")
+            st.stop()
+
+        # Automatic timestamps
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         with conn() as c:
             if selected == "New Project":
                 c.execute(
                     """
                     INSERT INTO projects
-                    (name, pillar, priority, description, owner, status, start_date, due_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (name, pillar, priority, description, owner, status, start_date, due_date, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (name, pillar_clean, priority, description, owner_clean, status_clean, start_str, due_str),
+                    (name, pillar_clean, priority, description, owner_clean, status_clean,
+                     start_str, due_str, now, now),
                 )
                 st.success("Project added.")
             else:
                 c.execute(
                     """
                     UPDATE projects
-                    SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?
+                    SET name=?, pillar=?, priority=?, description=?, owner=?, status=?,
+                        start_date=?, due_date=?, updated_at=?
                     WHERE id=?
                     """,
                     (name, pillar_clean, priority, description, owner_clean, status_clean,
-                     start_str, due_str, project["id"]),
+                     start_str, due_str, now, project["id"]),
                 )
                 st.success("Project updated.")
 
