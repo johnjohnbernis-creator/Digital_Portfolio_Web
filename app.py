@@ -41,19 +41,17 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
                 args.append(filters[col])
 
         if filters.get("priority") and filters["priority"] != "All":
-            # ensure priority is compared numerically (store as text-safe)
             where.append("CAST(priority AS TEXT) = ?")
             args.append(str(filters["priority"]))
 
         if filters.get("search"):
-            s = f"%{filters['search'].lower()}%"
+            s = f"%{str(filters['search']).lower()}%"
             where.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
             args.extend([s, s])
 
     if where:
         q += " WHERE " + " AND ".join(where)
 
-    # Sort first by start_date then due_date (keeps NULLs last)
     q += " ORDER BY COALESCE(start_date,''), COALESCE(due_date,'')"
 
     with conn() as c:
@@ -72,7 +70,6 @@ def distinct_values(col: str) -> List[str]:
             """,
             c,
         )
-    # Ensure string output
     return df[col].dropna().astype(str).tolist()
 
 
@@ -172,13 +169,22 @@ with tab_editor:
 
     with colA:
         name = st.text_input("Name*", project.get("name", ""))
-        # allow free typing but offer known pillars
-        pillar_choices = [""] + distinct_values("pillar")
-        pillar = st.selectbox("Pillar*", pillar_choices, index=pillar_choices.index(project.get("pillar", "")) if project.get("pillar", "") in pillar_choices else 0)
 
-        # priority as numeric; default 1
+        pillar_choices = [""] + distinct_values("pillar")
+        pillar = st.selectbox(
+            "Pillar*",
+            pillar_choices,
+            index=(
+                pillar_choices.index(project.get("pillar", ""))
+                if project.get("pillar", "") in pillar_choices
+                else 0
+            ),
+        )
+
         pr_default = int(project.get("priority") or 1)
-        priority = st.number_input("Priority", min_value=1, max_value=10, value=pr_default, step=1)
+        priority = st.number_input(
+            "Priority", min_value=1, max_value=10, value=pr_default, step=1
+        )
 
         st.markdown(
             f"<span style='color:{priority_color(priority)}; font-size:22px;'>●</span> "
@@ -190,8 +196,18 @@ with tab_editor:
 
     with colB:
         owner = st.text_input("Owner", project.get("owner", ""))
+
         status_choices = [""] + distinct_values("status")
-        status = st.selectbox("Status", status_choices, index=status_choices.index(project.get("status", "")) if project.get("status", "") in status_choices else 0)
+        status = st.selectbox(
+            "Status",
+            status_choices,
+            index=(
+                status_choices.index(project.get("status", ""))
+                if project.get("status", "") in status_choices
+                else 0
+            ),
+        )
+
         start_date = st.date_input("Start Date", value=start_val)
         due_date = st.date_input("Due Date", value=due_val)
 
@@ -283,6 +299,7 @@ with tab_dashboard:
 
     # Priority as integers when possible, then sorted
     priority_vals_raw = distinct_values("priority")
+
     def _to_intable(x: str) -> Optional[int]:
         try:
             return int(float(x))
@@ -290,7 +307,7 @@ with tab_dashboard:
             return None
 
     priority_ints = sorted({p for p in map(_to_intable, priority_vals_raw) if p is not None})
-    priority_opts = ["All"] + priority_ints
+    priority_opts: List[Any] = ["All"] + priority_ints
 
     pillar_f = colF1.selectbox("Pillar", pillars)
     status_f = colF2.selectbox("Status", statuses)
@@ -308,7 +325,6 @@ with tab_dashboard:
 
     data = fetch_df(filters).copy()
 
-    # Ensure columns exist when DB is light
     for col in ["start_date", "due_date", "pillar", "priority", "name"]:
         if col not in data.columns:
             data[col] = None
@@ -333,13 +349,12 @@ with tab_dashboard:
     st.markdown("---")
     st.subheader(f"Top {top_n} Projects per Pillar")
 
-    # Sort by numeric priority ascending (1 = highest)
     data["priority_num"] = pd.to_numeric(data["priority"], errors="coerce")
     top_df = (
         data.sort_values("priority_num", na_position="last")
-            .groupby("pillar", dropna=False, sort=False)
-            .head(top_n)
-            .drop(columns=["priority_num"])
+        .groupby("pillar", dropna=False, sort=False)
+        .head(top_n)
+        .drop(columns=["priority_num"])
     )
 
     st.dataframe(
