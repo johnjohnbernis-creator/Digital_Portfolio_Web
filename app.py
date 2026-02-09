@@ -113,6 +113,19 @@ with st.sidebar:
         st.write("### SQLite table structure:")
         for r in rows:
             st.write(r)# ----------------------------------------------------------
+# ----------------------------------------------------------
+# SHOW SQLITE TABLE STRUCTURE (DEBUG)
+# ----------------------------------------------------------
+with st.sidebar:
+    st.write("### Debug Tools")
+    if st.button("Show SQL Table Structure"):
+        import sqlite3
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute("PRAGMA table_info(projects)")
+        rows = cur.fetchall()
+        st.code(rows)
+
 # DEBUG BUTTON — SHOW TABLE STRUCTURE
 # ----------------------------------------------------------
 with st.sidebar:
