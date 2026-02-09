@@ -15,11 +15,13 @@ TABLE = "projects"
 
 
 # ---------- Utilities ----------
+# ---------- Utilities ----------
 def conn() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
-def try_date(s: Optional[str]) -> Optionalif not s:
+def try_date(s: Optional[str]) -> Optional[date]:
+    if not s:
         return None
     try:
         return datetime.strptime(str(s), "%Y-%m-%d").date()
@@ -29,7 +31,8 @@ def try_date(s: Optional[str]) -> Optionalif not s:
 
 def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
     q = f"SELECT * FROM {TABLE}"
-    args, where = [], []
+    args = []
+    where = []
 
     if filters:
         for col in ["pillar", "status", "owner"]:
@@ -55,7 +58,11 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
         return pd.read_sql_query(q, c, params=args)
 
 
-def distinct_values(col: str) -> Listwith conn() as c:
+# ---------- FIXED distinct_values ----------
+from typing import List
+
+def distinct_values(col: str) -> List[str]:
+    with conn() as c:
         df = pd.read_sql_query(
             f"""
             SELECT DISTINCT {col}
@@ -63,11 +70,9 @@ def distinct_values(col: str) -> Listwith conn() as c:
             WHERE {col} IS NOT NULL AND TRIM({col}) <> ''
             ORDER BY {col}
             """,
-            c,
+            c
         )
     return df[col].dropna().astype(str).tolist()
-
-
 # ---------- Priority Color Helpers ----------
 def priority_color(p):
     try:
