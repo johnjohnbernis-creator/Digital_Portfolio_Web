@@ -520,3 +520,24 @@ if show_table:
         st.dataframe(data, use_container_width=True)
     else:
         st.info("No projects match your current filters.")
+# ------------------ Export CSV ------------------
+st.markdown("### Export Options")
+
+csv_data = data.to_csv(index=False).encode("utf-8")
+
+st.download_button(
+    label="📥 Download CSV Report",
+    data=csv_data,
+    file_name="digital_portfolio_report.csv",
+    mime="text/csv",
+)
+# ------------------ Print Report Button ------------------
+if st.button("🖨️ Print Report (PDF)"):
+    st.markdown(
+        """
+        <script>
+        window.print();
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
