@@ -14,7 +14,33 @@ DB_PATH = "portfolio.db"
 TABLE = "projects"
 NEW_LABEL = "<New Project>"
 ALL_LABEL = "All"
+def choose_or_type(
+    label: str,
+    existing_values: list[str],
+    default_value: str = "",
+    manual_label: str = "➕ Type manually…",
+) -> tuple[str, bool]:
+    """
+    Returns (final_value, used_manual) where:
+      - final_value: chosen or typed value (stripped)
+      - used_manual: True if user typed manually
+    """
+    # Build options with the sentinel for manual entry
+    options = [manual_label] + existing_values
 
+    # Default to existing value if available, otherwise manual entry
+    if default_value and default_value in existing_values:
+        idx = options.index(default_value) if default_value in options else 0
+    else:
+        idx = 0  # "➕ Type manually…"
+
+    choice = st.selectbox(label, options, index=idx)
+    if choice == manual_label:
+        typed = st.text_input(f"{label} (manual entry)", value=(default_value or ""))
+        return typed.strip(), True
+    else:
+        return choice.strip(), False
+``
 # ------------------ Utilities ------------------
 def conn() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH, check_same_thread=False)
