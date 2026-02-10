@@ -582,64 +582,33 @@ if show_table:
 st.markdown("---")
 st.subheader("Export Options")
 
-# ---------- CSV (Filtered) ----------
-filtered_csv = data.to_csv(index=False).encode("utf-8")
+# CSV exports (always available)
 st.download_button(
-    label="⬇️ Download CSV Report (Filtered)",
-    data=filtered_csv,
+    "⬇️ Download CSV Report (Filtered)",
+    data=data.to_csv(index=False).encode("utf-8"),
     file_name="portfolio_filtered.csv",
     mime="text/csv",
     key="export_csv_filtered",
 )
 
-# ---------- CSV (Full DB) ----------
-full_df = fetch_all_projects()
-full_csv = full_df.to_csv(index=False).encode("utf-8")
 st.download_button(
-    label="🗄️ Download FULL Database (CSV)",
-    data=full_csv,
+    "🗄️ Download FULL Database (CSV)",
+    data=fetch_all_projects().to_csv(index=False).encode("utf-8"),
     file_name="portfolio_full_database.csv",
     mime="text/csv",
     key="export_csv_full_db",
 )
 
-# ---------- PDF Export ----------
-if REPORTLAB_AVAILABLE:
-    pdf_bytes = build_pdf_report(data, title="Digital Portfolio Report (Filtered)")
-    st.download_button(
-        label="🖨️ Download Printable Report (PDF)",
-        data=pdf_bytes,
-        file_name="portfolio_report_filtered.pdf",
-        mime="application/pdf",
-        key="export_pdf_filtered",
-    )
-else:
-    st.info("📄 PDF export disabled (optional dependency not installed).")
-
-# ------------------ Roadmap Export ------------------
+# ------------------ Export Roadmap ------------------
 if roadmap_fig is not None:
     st.markdown("---")
     st.subheader("Export Roadmap")
 
-    # ✅ Always-works HTML export (no dependencies)
-    roadmap_html = roadmap_fig.to_html(include_plotlyjs="cdn")
+    # Always available
     st.download_button(
-        label="🌐 Download Roadmap (Interactive HTML)",
-        data=roadmap_html,
+        "🌐 Download Roadmap (Interactive HTML)",
+        data=roadmap_fig.to_html(include_plotlyjs="cdn"),
         file_name="roadmap.html",
         mime="text/html",
         key="export_roadmap_html",
     )
-
-    # ✅ PNG only if Kaleido is available
-    if KALEIDO_AVAILABLE:
-        img_bytes = pio.to_image(roadmap_fig, format="png", scale=2)
-        st.download_button(
-            label="📸 Download Roadmap (PNG)",
-            data=img_bytes,
-            file_name="roadmap.png",
-            mime="image/png",
-            key="export_roadmap_png",
-        )
-    else:
-        st.info("🖼️ PNG export disabled (Kaleido/Chrome not available).")
