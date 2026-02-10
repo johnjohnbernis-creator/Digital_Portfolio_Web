@@ -20,14 +20,14 @@ def conn() -> sqlite3.Connection:
 
 
 def to_iso(d: Optional[date]) -> Optional[str]:
-    """Convert a date to YYYY-MM-DD or return None if empty."""
+    """Convert a date to YYYY-MM-DD or return None."""
     if not d:
         return None
     return d.strftime("%Y-%m-%d")
 
 
 def try_date(s: Optional[Union[str, date]]) -> Optional[date]:
-    """Accept None/''/str/date; return date or None."""
+    """Accept None/''/str/date; return datetime.date or None."""
     if isinstance(s, date):
         return s
     if not s:
@@ -200,6 +200,8 @@ K_STATUS = "w_status"
 K_START = "w_start"   # will hold a date or None
 K_DUE = "w_due"       # will hold a date or None
 K_DESC = "w_desc"
+K_NO_START = "w_no_start"
+K_NO_DUE = "w_no_due"
 
 # Initialize state
 st.session_state.setdefault("current_project_id", None)
@@ -213,13 +215,15 @@ status_values = status_defaults + [s for s in distinct_values("status") if s not
 # Pre-populate default widget values if missing
 default_state = {
     K_NAME: "",
-    K_PILLAR: "",               # "" will map to first option in pillar selectbox (we include "")
+    K_PILLAR: "",               # "" means no pillar selected yet
     K_PRIORITY: 3,
     K_OWNER: "",
     K_STATUS: "Idea",
-    K_START: None,              # use None for no date selected
+    K_START: None,              # None => no date (we’ll show a checkbox to allow None)
     K_DUE: None,
     K_DESC: "",
+    K_NO_START: True,           # default to "no start date" for a new record
+    K_NO_DUE: True,             # default to "no due date" for a new record
 }
 for k, v in default_state.items():
     st.session_state.setdefault(k, v)
@@ -245,7 +249,7 @@ loaded = fetch_one_by_id(st.session_state.current_project_id) if st.session_stat
 # Apply loaded record -> widget state (only when the loaded id changes)
 if loaded and st.session_state._loaded_id != loaded.get("id"):
     st.session_state[K_NAME] = str(loaded.get("name") or "")
-    # ensure pillar/status values available in options
+    # ensure pillar/status options include the loaded values
     if loaded.get("pillar") and loaded["pillar"] not in pillar_values:
         pillar_values = [loaded["pillar"]] + pillar_values
     if loaded.get("status") and loaded["status"] not in status_values:
@@ -256,9 +260,11 @@ if loaded and st.session_state._loaded_id != loaded.get("id"):
     st.session_state[K_OWNER] = str(loaded.get("owner") or "")
     st.session_state[K_STATUS] = str(loaded.get("status") or "Idea")
 
-    # Convert DB strings to date objects for date_input
+    # Convert DB strings to date objects
     st.session_state[K_START] = try_date(loaded.get("start_date"))
     st.session_state[K_DUE] = try_date(loaded.get("due_date"))
+    st.session_state[K_NO_START] = st.session_state[K_START] is None
+    st.session_state[K_NO_DUE] = st.session_state[K_DUE] is None
 
     st.session_state[K_DESC] = str(loaded.get("description") or "")
     st.session_state._loaded_id = loaded.get("id")
@@ -282,9 +288,16 @@ with st.form("project_form", clear_on_submit=False):
     owner = lc2.text_input("Owner", key=K_OWNER)
     status = lc2.selectbox("Status", options=status_values, key=K_STATUS)
 
-    # Use date_input (with ability to clear by toggling back to None via handlers)
-    start_dt = lc2.date_input("Start", key=K_START, value=st.session_state[K_START], format="YYYY-MM-DD")
-    due_dt = lc2.date_input("Due", key=K_DUE, value=st.session_state[K_DUE], format="YYYY-MM-DD")
+    # Date inputs with "No date" checkboxes
+    # Streamlit date_input requires a date; we use today's date when "No date" is checked,
+    # then ignore it when saving if the checkbox is set.
+    no_start = lc2.checkbox("No Start Date", key=K_NO_START)
+    start_val = st.session_state[K_START] or date.today()
+    start_dt = lc2.date_input("Start", value=start_val, format="YYYY-MM-DD", key=K_START)
+
+    no_due = lc2.checkbox("No Due Date", key=K_NO_DUE)
+    due_val = st.session_state[K_DUE] or date.today()
+    due_dt = lc2.date_input("Due", value=due_val, format="YYYY-MM-DD", key=K_DUE)
 
     # Description full width
     description = st.text_area("Description", height=120, key=K_DESC)
@@ -298,6 +311,9 @@ with st.form("project_form", clear_on_submit=False):
     clear_clicked   = bcol5.form_submit_button("Clear")
 
 # Build a clean record from current widget values (outside the form)
+start_out: Optional[str] = None if st.session_state[K_NO_START] else to_iso(try_date(st.session_state[K_START]))
+due_out: Optional[str] = None if st.session_state[K_NO_DUE] else to_iso(try_date(st.session_state[K_DUE]))
+
 rec = dict(
     name=(st.session_state[K_NAME] or "").strip(),
     pillar=(st.session_state[K_PILLAR] or "").strip(),
@@ -305,8 +321,8 @@ rec = dict(
     description=(st.session_state[K_DESC] or "").strip(),
     owner=(st.session_state[K_OWNER] or "").strip(),
     status=(st.session_state[K_STATUS] or "").strip(),
-    start_date=to_iso(try_date(st.session_state[K_START])),
-    due_date=to_iso(try_date(st.session_state[K_DUE])),
+    start_date=start_out,
+    due_date=due_out,
 )
 
 def missing_required(r: Dict[str, Any]) -> Optional[str]:
@@ -482,7 +498,7 @@ if show_kpi:
 if show_pillar_chart:
     st.markdown("---")
     status_df = data.copy()
-    status_df["state"] = status_df["status"].apply(
+apply(
         lambda x: "Completed" if str(x).lower() == "done" else "Ongoing"
     )
 
@@ -540,4 +556,3 @@ if show_roadmap:
 st.markdown("---")
 st.subheader("Projects")
 st.dataframe(data, use_container_width=True)
-``
