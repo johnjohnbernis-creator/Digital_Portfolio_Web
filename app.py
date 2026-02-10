@@ -24,14 +24,14 @@ def safe_migrate():
     with conn() as c:
         cur = c.cursor()
 
-        # 1. Add progress column
+        # Add progress column
         cur.execute(
             "SELECT name FROM pragma_table_info('projects') WHERE name='progress';"
         )
         if not cur.fetchone():
             cur.execute("ALTER TABLE projects ADD COLUMN progress INTEGER DEFAULT 0;")
 
-        # 2. Add progress_status column
+        # Add progress_status column
         cur.execute(
             "SELECT name FROM pragma_table_info('projects') WHERE name='progress_status';"
         )
@@ -72,8 +72,7 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
         return pd.read_sql_query(q, c, params=args)
 
 
-def distinct_values(col: str) -> List[str]:
-    with conn() as c:
+def distinct_values(col: str) -> Listwith conn() as c:
         df = pd.read_sql_query(
             f"""
             SELECT DISTINCT {col}
@@ -152,6 +151,7 @@ with tab_editor:
     options = ["New Project"] + existing["name"].tolist()
     selected = st.selectbox("Select Project", options)
 
+    # ---------- New Project Case ----------
     if selected == "New Project":
         project = dict(
             id=None,
@@ -166,12 +166,27 @@ with tab_editor:
             progress=0,
             progress_status=""
         )
+
     else:
-        pid = existing[existing["name"] == selected].iloc[0]["id"]
+        # ---------- SAFE PROJECT LOADING ----------
+        pid_row = existing[existing["name"] == selected]
+
+        if pid_row.empty:
+            st.warning("The selected project no longer exists. Refreshing…")
+            st.experimental_rerun()
+
+        pid = pid_row.iloc[0]["id"]
+
         with conn() as c:
             df = pd.read_sql_query("SELECT * FROM projects WHERE id=?", c, params=[pid])
+
+        if df.empty:
+            st.warning("Project record missing. Refreshing…")
+            st.experimental_rerun()
+
         project = df.iloc[0].to_dict()
 
+    # ---------- Parse Dates ----------
     def parse_date(d):
         try:
             return datetime.strptime(str(d), "%Y-%m-%d").date()
@@ -183,12 +198,14 @@ with tab_editor:
 
     colA, colB = st.columns([2, 2])
 
+    # ---------- LEFT SIDE ----------
     with colA:
         name = st.text_input("Name*", project["name"])
         pillar = st.selectbox("Pillar*", [""] + distinct_values("pillar"))
         priority = st.number_input("Priority", 1, 10, int(project["priority"] or 1))
         description = st.text_area("Description", project.get("description", ""))
 
+    # ---------- RIGHT SIDE ----------
     with colB:
         owner = st.text_input("Owner", project.get("owner", ""))
         status = st.selectbox("Status", [""] + distinct_values("status"))
@@ -197,22 +214,22 @@ with tab_editor:
         progress = st.slider("Progress (%)", 0, 100, int(project.get("progress", 0)))
 
         st.text_input(
-            "Update Tag (automatic)", 
-            project.get("progress_status", ""), 
+            "Update Tag (automatic)",
+            project.get("progress_status", ""),
             disabled=True
         )
 
+    # ---------- Clean Inputs ----------
     start_str = start_date.strftime("%Y-%m-%d")
     due_str = due_date.strftime("%Y-%m-%d")
 
-    # Convert blank → None
     pillar_clean = pillar.strip() or None
     status_clean = status.strip() or None
     owner_clean = owner.strip() or None
 
     c1, c2, c3 = st.columns(3)
 
-    # ---- SAVE ----
+    # ---------- SAVE ----------
     if c1.button("New / Save"):
 
         if not name.strip():
@@ -235,8 +252,11 @@ with tab_editor:
                      created_at, updated_at, progress, progress_status)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (name, pillar_clean, priority, description, owner_clean, status_clean,
-                     start_str, due_str, now, now, progress, tag),
+                    (
+                        name, pillar_clean, priority, description, owner_clean,
+                        status_clean, start_str, due_str,
+                        now, now, progress, tag
+                    )
                 )
                 st.success("Project added.")
 
@@ -248,16 +268,21 @@ with tab_editor:
                         start_date=?, due_date=?, updated_at=?, progress=?, progress_status=?
                     WHERE id=?
                     """,
-                    (name, pillar_clean, priority, description, owner_clean, status_clean,
-                     start_str, due_str, now, progress, tag, project["id"]),
+                    (
+                        name, pillar_clean, priority, description, owner_clean,
+                        status_clean, start_str, due_str,
+                        now, progress, tag, project["id"]
+                    )
                 )
                 st.success("Project updated.")
 
+    # ---------- DELETE ----------
     if c2.button("Delete") and selected != "New Project":
         with conn() as c:
             c.execute("DELETE FROM projects WHERE id=?", (project["id"],))
         st.warning("Project deleted.")
 
+    # ---------- CLEAR ----------
     if c3.button("Clear"):
         st.experimental_rerun()
 
@@ -284,8 +309,11 @@ with tab_dashboard:
     search_f = colF6.text_input("Search")
 
     filters = dict(
-        pillar=pillar_f, status=status_f, owner=owner_f,
-        priority=priority_f, search=search_f
+        pillar=pillar_f,
+        status=status_f,
+        owner=owner_f,
+        priority=priority_f,
+        search=search_f
     )
 
     data = fetch_df(filters)
@@ -293,6 +321,7 @@ with tab_dashboard:
     st.markdown("---")
     st.subheader("Projects Overview")
 
+    # HTML progress bar
     def render_progress_bar(p):
         color = progress_color(p)
         return f"""
@@ -307,10 +336,13 @@ with tab_dashboard:
     data["Progress Bar"] = data["progress"].apply(render_progress_bar)
 
     st.write(
-        data[[
-            "name", "pillar", "priority", "owner", "status",
-            "progress", "progress_status", "Progress Bar"
-        ]].to_html(escape=False), unsafe_allow_html=True
+        data[
+            [
+                "name", "pillar", "priority", "owner", "status",
+                "progress", "progress_status", "Progress Bar"
+            ]
+        ].to_html(escape=False),
+        unsafe_allow_html=True
     )
 
 
