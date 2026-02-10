@@ -263,10 +263,11 @@ if st.session_state["current_project_id"]:
 
 # ---------- FORM ----------
 with st.form("project_form"):
+    pillar_list = distinct_values("pillar")
     c1, c2 = st.columns(2)
 
     c1.text_input("Name*", key=K_NAME)
-    c1.text_input("Pillar*", key=K_PILLAR)
+    cc1.selectbox("Pillar*", [""] + pillar_list, key=K_PILLAR)
     c1.number_input("Priority", min_value=1, max_value=99, key=K_PRIORITY)
 
     c2.text_input("Owner", key=K_OWNER)
