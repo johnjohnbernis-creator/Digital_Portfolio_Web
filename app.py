@@ -38,9 +38,8 @@ def choose_or_type(
     if choice == manual_label:
         typed = st.text_input(f"{label} (manual entry)", value=(default_value or ""))
         return typed.strip(), True
- else:
+    else:
         return choice.strip(), False
-``
 # ------------------ Utilities ------------------
 def conn() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH, check_same_thread=False)
