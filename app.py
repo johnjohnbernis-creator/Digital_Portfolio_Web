@@ -18,7 +18,7 @@ ALL_LABEL = "All"
 
 def choose_or_type(
     label: str,
-    existing_values: list[str],
+    existing_values: List[str],
     default_value: str = "",
     manual_label: str = "➕ Type manually…",
 ) -> tuple[str, bool]:
@@ -27,7 +27,6 @@ def choose_or_type(
       - final_value: chosen or typed value (stripped)
       - used_manual: True if user typed manually
     """
-    # Build options with the sentinel for manual entry
     options = [manual_label] + existing_values
 
     # Default to existing value if available, otherwise manual entry
@@ -65,7 +64,7 @@ def ensure_schema() -> None:
                 start_date TEXT,  -- ISO YYYY-MM-DD
                 due_date   TEXT   -- ISO YYYY-MM-DD
             )
-        """
+            """
         )
         c.commit()
 
@@ -226,9 +225,7 @@ with st.form("project_form"):
     start_val = (
         try_date(loaded_project.get("start_date")) if loaded_project else date.today()
     )
-    due_val = (
-        try_date(loaded_project.get("due_date")) if loaded_project else date.today()
-    )
+    due_val = try_date(loaded_project.get("due_date")) if loaded_project else date.today()
     desc_val = loaded_project.get("description") if loaded_project else ""
 
     # ---- LEFT COLUMN ----
@@ -354,7 +351,7 @@ with st.form("project_form"):
             st.warning("Select an existing project to delete.")
         else:
             with conn() as c:
-                c.execute(f"DELETE FROM {TABLE} WHERE id=?", (int(loaded_project["id"]),))
+                c.execute("DELETE FROM {table} WHERE id=?".format(table=TABLE), (int(loaded_project["id"]),))
                 c.commit()
             try:
                 st.cache_data.clear()
@@ -375,7 +372,7 @@ statuses = [ALL_LABEL] + distinct_values("status")
 owners = [ALL_LABEL] + distinct_values("owner")
 
 # Priority distinct as numeric sorted options
-priority_vals = []
+priority_vals: List[int] = []
 try:
     pv = distinct_values("priority")
     priority_vals = sorted({int(x) for x in pv if str(x).strip().isdigit()})
@@ -462,9 +459,7 @@ if show_pillar_chart:
             .size()
             .reset_index(name="count")
         )
-        pillar_summary["pillar"] = (
-            pillar_summary["pillar"].replace("", "(Unspecified)")
-        )
+        pillar_summary["pillar"] = pillar_summary["pillar"].replace("", "(Unspecified)")
         if not pillar_summary.empty:
             fig = px.bar(
                 pillar_summary,
@@ -525,4 +520,3 @@ if show_table:
         st.dataframe(data, use_container_width=True)
     else:
         st.info("No projects match your current filters.")
-``
