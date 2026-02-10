@@ -531,6 +531,17 @@ st.download_button(
     file_name="digital_portfolio_report.csv",
     mime="text/csv",
 )
+
+# ------------------ Print Report Button ------------------
+if st.button("🖨️ Print Report (PDF)"):
+    st.markdown(
+        """
+        <script>
+        window.print();
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
 # ------------------ Print Report Button ------------------
 if st.button("🖨️ Print Report (PDF)"):
     st.markdown(
