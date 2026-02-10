@@ -16,7 +16,7 @@ TABLE = "projects"
 
 # ---------- DB Utilities ----------
 def conn() -> sqlite3.Connection:
-    # Creates the DB file on first connection if it doesn't exist
+    """Create (if needed) and return a SQLite connection to the portfolio DB."""
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
@@ -310,11 +310,11 @@ with tab_editor:
                 ),
             )
 
-            start_date = st.date_input("Start Date", value=start_val)
-            due_date = st.date_input("Due Date", value=due_val)
+            start_date_val = st.date_input("Start Date", value=start_val)
+            due_date_val = st.date_input("Due Date", value=due_val)
 
-        start_str = start_date.strftime("%Y-%m-%d")
-        due_str = due_date.strftime("%Y-%m-%d")
+        start_str = start_date_val.strftime("%Y-%m-%d")
+        due_str = due_date_val.strftime("%Y-%m-%d")
 
         # Clean empty strings → None for DB
         pillar_clean = pillar if pillar and pillar.strip() else None
