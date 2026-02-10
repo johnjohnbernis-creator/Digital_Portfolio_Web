@@ -14,6 +14,8 @@ DB_PATH = "portfolio.db"
 TABLE = "projects"
 NEW_LABEL = "<New Project>"
 ALL_LABEL = "All"
+
+
 def choose_or_type(
     label: str,
     existing_values: list[str],
@@ -40,14 +42,18 @@ def choose_or_type(
         return typed.strip(), True
     else:
         return choice.strip(), False
+
+
 # ------------------ Utilities ------------------
 def conn() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
+
 def ensure_schema() -> None:
     """Create DB schema if not present."""
     with conn() as c:
-        c.execute(f"""
+        c.execute(
+            f"""
             CREATE TABLE IF NOT EXISTS {TABLE} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -59,11 +65,14 @@ def ensure_schema() -> None:
                 start_date TEXT,  -- ISO YYYY-MM-DD
                 due_date   TEXT   -- ISO YYYY-MM-DD
             )
-        """)
+        """
+        )
         c.commit()
+
 
 def to_iso(d: Optional[date]) -> str:
     return d.strftime("%Y-%m-%d") if d else ""
+
 
 def try_date(s: Optional[str]) -> Optional[date]:
     if not s:
@@ -73,6 +82,7 @@ def try_date(s: Optional[str]) -> Optional[date]:
     except Exception:
         return None
 
+
 def safe_index(options: List[str], val: Optional[str], default: int = 0) -> int:
     """Return index of val in options if present; otherwise default."""
     try:
@@ -81,6 +91,7 @@ def safe_index(options: List[str], val: Optional[str], default: int = 0) -> int:
     except Exception:
         pass
     return default
+
 
 @st.cache_data(show_spinner=False)
 def distinct_values(col: str) -> List[str]:
@@ -95,6 +106,7 @@ def distinct_values(col: str) -> List[str]:
             c,
         )
     return df[col].dropna().astype(str).tolist()
+
 
 def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
     q = f"SELECT * FROM {TABLE}"
@@ -128,9 +140,11 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
     with conn() as c:
         return pd.read_sql_query(q, c, params=args)
 
+
 def status_to_state(x: Any) -> str:
     s = str(x).strip().lower()
     return "Completed" if s in {"done", "complete", "completed"} else "Ongoing"
+
 
 # ------------------ App Boot ------------------
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
@@ -153,7 +167,9 @@ if "project_selector" not in st.session_state:
 with conn() as c:
     df_projects = pd.read_sql_query(f"SELECT id, name FROM {TABLE} ORDER BY name", c)
 
-project_options = [NEW_LABEL] + [f"{row['id']} — {row['name']}" for _, row in df_projects.iterrows()]
+project_options = [NEW_LABEL] + [
+    f"{row['id']} — {row['name']}" for _, row in df_projects.iterrows()
+]
 
 selected_project = st.selectbox(
     "Select Project to Edit",
@@ -168,7 +184,9 @@ if selected_project != NEW_LABEL:
     try:
         project_id = int(selected_project.split(" — ")[0])
         with conn() as c:
-            df = pd.read_sql_query(f"SELECT * FROM {TABLE} WHERE id=?", c, params=[project_id])
+            df = pd.read_sql_query(
+                f"SELECT * FROM {TABLE} WHERE id=?", c, params=[project_id]
+            )
             if not df.empty:
                 loaded_project = df.iloc[0].to_dict()
     except Exception:
@@ -177,11 +195,11 @@ if selected_project != NEW_LABEL:
 # Load dropdown value sets
 pillar_list = distinct_values("pillar")
 status_list = distinct_values("status")
-owner_list  = distinct_values("owner")
+owner_list = distinct_values("owner")
 
 # ---------- Non-form buttons (page-level actions) ----------
 bcol1, bcol2 = st.columns([1, 1])
-new_clicked   = bcol1.button("New")
+new_clicked = bcol1.button("New")
 clear_clicked = bcol2.button("Clear")
 
 if new_clicked:
@@ -200,45 +218,54 @@ with st.form("project_form"):
     c1, c2 = st.columns(2)
 
     # Defaults for form fields
-    name_val     = loaded_project.get("name")        if loaded_project else ""
-    pillar_val   = loaded_project.get("pillar")      if loaded_project else ""
+    name_val = loaded_project.get("name") if loaded_project else ""
+    pillar_val = loaded_project.get("pillar") if loaded_project else ""
     priority_val = int(loaded_project.get("priority", 5)) if loaded_project else 5
-    owner_val    = loaded_project.get("owner")       if loaded_project else ""
-    status_val   = loaded_project.get("status")      if loaded_project else ""
-    start_val    = try_date(loaded_project.get("start_date")) if loaded_project else date.today()
-    due_val      = try_date(loaded_project.get("due_date"))   if loaded_project else date.today()
-    desc_val     = loaded_project.get("description") if loaded_project else ""
+    owner_val = loaded_project.get("owner") if loaded_project else ""
+    status_val = loaded_project.get("status") if loaded_project else ""
+    start_val = (
+        try_date(loaded_project.get("start_date")) if loaded_project else date.today()
+    )
+    due_val = (
+        try_date(loaded_project.get("due_date")) if loaded_project else date.today()
+    )
+    desc_val = loaded_project.get("description") if loaded_project else ""
 
     # ---- LEFT COLUMN ----
-    project_name    = c1.text_input("Name*", value=name_val)
-   project_pillar, pillar_used_manual = choose_or_type(
-        label="Pillar*",
-        existing_values=pillar_list,
-        default_value=pillar_val or "",
-    )
-``
-    project_priority = c1.number_input("Priority", min_value=1, max_value=99, value=priority_val)
+    with c1:
+        project_name = st.text_input("Name*", value=name_val)
+        project_pillar, pillar_used_manual = choose_or_type(
+            label="Pillar*",
+            existing_values=pillar_list,
+            default_value=pillar_val or "",
+        )
+        project_priority = st.number_input(
+            "Priority", min_value=1, max_value=99, value=priority_val
+        )
+        description = st.text_area("Description", value=desc_val, height=120)
 
     # ---- RIGHT COLUMN ----
-    project_owner, owner_used_manual = choose_or_type(
-        label="Owner",
-        existing_values=owner_list,
-        default_value=owner_val or "",
-    )
+    with c2:
+        project_owner, owner_used_manual = choose_or_type(
+            label="Owner",
+            existing_values=owner_list,
+            default_value=owner_val or "",
+        )
+        project_status = st.selectbox(
+            "Status", [""] + status_list, index=safe_index([""] + status_list, status_val)
+        )
+        start_date = st.date_input("Start Date", value=start_val)
+        due_date = st.date_input("Due Date", value=due_val)
 
-    project_status = c2.selectbox(
-        "Status", [""] + status_list,
-        index=safe_index([""] + status_list, status_val)
-    )
     # ---- FORM SUBMIT BUTTONS ----
     col_a, col_b, col_c = st.columns(3)
-    submitted_new    = col_a.form_submit_button("Save New")
+    submitted_new = col_a.form_submit_button("Save New")
     submitted_update = col_b.form_submit_button("Update")
     submitted_delete = col_c.form_submit_button("Delete")
 
     # ------------- CRUD ACTIONS (on submit) -------------
     # CREATE
-         if submitted_new:
+    if submitted_new:
         errors = []
         if not project_name:
             errors.append("Name is required.")
@@ -277,7 +304,6 @@ with st.form("project_form"):
             st.success("Project created!")
             st.session_state.project_selector = NEW_LABEL
             st.rerun()
-``
 
     # UPDATE
     if submitted_update:
@@ -322,7 +348,6 @@ with st.form("project_form"):
                 st.success("Project updated!")
                 st.rerun()
 
-
     # DELETE
     if submitted_delete:
         if not loaded_project:
@@ -331,7 +356,7 @@ with st.form("project_form"):
             with conn() as c:
                 c.execute(f"DELETE FROM {TABLE} WHERE id=?", (int(loaded_project["id"]),))
                 c.commit()
-          try:
+            try:
                 st.cache_data.clear()
             except Exception:
                 pass
@@ -345,9 +370,9 @@ st.subheader("Filters")
 
 colF1, colF2, colF3, colF4, colF6 = st.columns([1, 1, 1, 1, 2])
 
-pillars  = [ALL_LABEL] + distinct_values("pillar")
+pillars = [ALL_LABEL] + distinct_values("pillar")
 statuses = [ALL_LABEL] + distinct_values("status")
-owners   = [ALL_LABEL] + distinct_values("owner")
+owners = [ALL_LABEL] + distinct_values("owner")
 
 # Priority distinct as numeric sorted options
 priority_vals = []
@@ -358,11 +383,11 @@ except Exception:
     pass
 priority_opts = [ALL_LABEL] + [str(x) for x in priority_vals]
 
-pillar_f  = colF1.selectbox("Pillar",  pillars,  key="pillar_f")
-status_f  = colF2.selectbox("Status",  statuses, key="status_f")
-owner_f   = colF3.selectbox("Owner",   owners,   key="owner_f")
-priority_f= colF4.selectbox("Priority", priority_opts, key="priority_f")
-search_f  = colF6.text_input("Search", key="search_f")
+pillar_f = colF1.selectbox("Pillar", pillars, key="pillar_f")
+status_f = colF2.selectbox("Status", statuses, key="status_f")
+owner_f = colF3.selectbox("Owner", owners, key="owner_f")
+priority_f = colF4.selectbox("Priority", priority_opts, key="priority_f")
+search_f = colF6.text_input("Search", key="search_f")
 
 filters = dict(
     pillar=pillar_f,
@@ -381,7 +406,7 @@ for col in ["start_date", "due_date", "pillar", "status", "name", "description"]
         data[col] = ""
 
 data["start_year"] = pd.to_datetime(data["start_date"], errors="coerce").dt.year
-data["due_year"]   = pd.to_datetime(data["due_date"], errors="coerce").dt.year
+data["due_year"] = pd.to_datetime(data["due_date"], errors="coerce").dt.year
 
 # ------------------ Report Controls ------------------
 st.markdown("---")
@@ -390,7 +415,7 @@ st.subheader("Report Controls")
 rc1, rc2, rc3, rc4 = st.columns([1, 1, 1, 2])
 
 year_mode = rc1.radio("Year Type", ["Start Year", "Due Year"])
-year_col  = "start_year" if year_mode == "Start Year" else "due_year"
+year_col = "start_year" if year_mode == "Start Year" else "due_year"
 
 years = [ALL_LABEL] + sorted(data[year_col].dropna().astype(int).unique().tolist())
 year_f = rc2.selectbox("Year", years)
@@ -402,10 +427,10 @@ show_all = rc4.checkbox("Show ALL Reports", value=True)
 # Individual toggles when not showing all
 if not show_all:
     cK1, cK2, cK3, cK4 = st.columns(4)
-    show_kpi          = cK1.checkbox("KPI Cards", True)
+    show_kpi = cK1.checkbox("KPI Cards", True)
     show_pillar_chart = cK2.checkbox("Pillar Status Chart", True)
-    show_roadmap      = cK3.checkbox("Roadmap", True)
-    show_table        = cK4.checkbox("Projects Table", True)
+    show_roadmap = cK3.checkbox("Roadmap", True)
+    show_table = cK4.checkbox("Projects Table", True)
 else:
     show_kpi = show_pillar_chart = show_roadmap = show_table = True
 
@@ -418,7 +443,7 @@ if show_kpi:
     k1, k2, k3, k4 = st.columns(4)
     total = len(data)
     completed = (data["status"].apply(status_to_state) == "Completed").sum()
-    ongoing   = (data["status"].apply(status_to_state) != "Completed").sum()
+    ongoing = (data["status"].apply(status_to_state) != "Completed").sum()
     pillars_count = data["pillar"].replace("", pd.NA).dropna().nunique()
 
     k1.metric("Projects", total)
@@ -437,7 +462,9 @@ if show_pillar_chart:
             .size()
             .reset_index(name="count")
         )
-        pillar_summary["pillar"] = pillar_summary["pillar"].replace("", "(Unspecified)")
+        pillar_summary["pillar"] = (
+            pillar_summary["pillar"].replace("", "(Unspecified)")
+        )
         if not pillar_summary.empty:
             fig = px.bar(
                 pillar_summary,
@@ -460,9 +487,9 @@ st.subheader(f"Top {top_n} Projects per Pillar")
 if not data.empty:
     top_df = (
         data.replace({"pillar": {"": "(Unspecified)"}})
-            .sort_values(["pillar", "priority", "name"], na_position="last")
-            .groupby("pillar", dropna=False, as_index=False)
-            .head(top_n)
+        .sort_values(["pillar", "priority", "name"], na_position="last")
+        .groupby("pillar", dropna=False, as_index=False)
+        .head(top_n)
     )
     st.dataframe(top_df, use_container_width=True)
 else:
@@ -473,7 +500,7 @@ if show_roadmap:
     st.markdown("---")
     st.subheader("Roadmap")
     gantt = data.copy()
-    gantt["Start"]  = pd.to_datetime(gantt["start_date"], errors="coerce")
+    gantt["Start"] = pd.to_datetime(gantt["start_date"], errors="coerce")
     gantt["Finish"] = pd.to_datetime(gantt["due_date"], errors="coerce")
     gantt = gantt.dropna(subset=["Start", "Finish"])
     if not gantt.empty:
@@ -498,3 +525,4 @@ if show_table:
         st.dataframe(data, use_container_width=True)
     else:
         st.info("No projects match your current filters.")
+``
