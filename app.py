@@ -20,7 +20,7 @@ def conn() -> sqlite3.Connection:
 
 
 def to_iso(d: Optional[date]) -> Optional[str]:
-    """Convert a date to YYYY-MM-DD or return None."""
+    """Convert a date to 'YYYY-MM-DD' or return None."""
     if not d:
         return None
     return d.strftime("%Y-%m-%d")
@@ -53,10 +53,7 @@ def _rerun():
 
 
 def ensure_schema():
-    """
-    Create table if it doesn't exist.
-    (If your DB already exists with a different schema, this won't change it.)
-    """
+    """Create table if it doesn't exist (non-destructive)."""
     with conn() as c:
         c.execute(
             f"""
@@ -197,33 +194,33 @@ K_PILLAR = "w_pillar"
 K_PRIORITY = "w_priority"
 K_OWNER = "w_owner"
 K_STATUS = "w_status"
-K_START = "w_start"   # will hold a date or None
-K_DUE = "w_due"       # will hold a date or None
+K_START = "w_start"   # holds a date
+K_DUE = "w_due"       # holds a date
 K_DESC = "w_desc"
 K_NO_START = "w_no_start"
 K_NO_DUE = "w_no_due"
 
 # Initialize state
 st.session_state.setdefault("current_project_id", None)
-st.session_state.setdefault("_loaded_id", None)  # tracks which record we've loaded into fields
+st.session_state.setdefault("_loaded_id", None)  # tracks which record is loaded into fields
 
-# Build lists for selectboxes (we need these BEFORE pre-populating state)
+# Build lists for selectboxes
 pillar_values = distinct_values("pillar")
 status_defaults = ["Idea", "Planned", "In Progress", "Blocked", "Done"]
 status_values = status_defaults + [s for s in distinct_values("status") if s not in status_defaults]
 
-# Pre-populate default widget values if missing
+# Default widget state
 default_state = {
     K_NAME: "",
-    K_PILLAR: "",               # "" means no pillar selected yet
+    K_PILLAR: "",
     K_PRIORITY: 3,
     K_OWNER: "",
     K_STATUS: "Idea",
-    K_START: None,              # None => no date (we’ll show a checkbox to allow None)
-    K_DUE: None,
+    K_START: date.today(),   # date_input needs a date; "No date" checkbox controls saving as None
+    K_DUE: date.today(),
     K_DESC: "",
-    K_NO_START: True,           # default to "no start date" for a new record
-    K_NO_DUE: True,             # default to "no due date" for a new record
+    K_NO_START: True,
+    K_NO_DUE: True,
 }
 for k, v in default_state.items():
     st.session_state.setdefault(k, v)
@@ -233,7 +230,10 @@ with conn() as c:
     df_names = pd.read_sql_query(
         f"SELECT id, name FROM {TABLE} ORDER BY name COLLATE NOCASE", c
     )
-project_options = ["<New Project>"] + [f"{int(r['id'])} — {r['name']}" for _, r in df_names.iterrows()]
+
+project_options = ["<New Project>"] + [
+    f"{int(r['id'])} — {r['name']}" for _, r in df_names.iterrows()
+]
 sel = st.selectbox("Load existing", project_options, index=0)
 
 if sel == "<New Project>":
@@ -246,61 +246,59 @@ else:
 
 loaded = fetch_one_by_id(st.session_state.current_project_id) if st.session_state.current_project_id else None
 
-# Apply loaded record -> widget state (only when the loaded id changes)
+# Load selected record into widgets (only when id changes)
 if loaded and st.session_state._loaded_id != loaded.get("id"):
-    st.session_state[K_NAME] = str(loaded.get("name") or "")
-    # ensure pillar/status options include the loaded values
+    # Ensure options include loaded values
     if loaded.get("pillar") and loaded["pillar"] not in pillar_values:
         pillar_values = [loaded["pillar"]] + pillar_values
     if loaded.get("status") and loaded["status"] not in status_values:
         status_values = [loaded["status"]] + status_values
 
+    st.session_state[K_NAME] = str(loaded.get("name") or "")
     st.session_state[K_PILLAR] = str(loaded.get("pillar") or "")
     st.session_state[K_PRIORITY] = _safe_int(loaded.get("priority"), 3)
     st.session_state[K_OWNER] = str(loaded.get("owner") or "")
     st.session_state[K_STATUS] = str(loaded.get("status") or "Idea")
 
-    # Convert DB strings to date objects
-    st.session_state[K_START] = try_date(loaded.get("start_date"))
-    st.session_state[K_DUE] = try_date(loaded.get("due_date"))
-    st.session_state[K_NO_START] = st.session_state[K_START] is None
-    st.session_state[K_NO_DUE] = st.session_state[K_DUE] is None
+    # Dates: if present, parse; else keep today's date but mark "no date"
+    start_parsed = try_date(loaded.get("start_date"))
+    due_parsed = try_date(loaded.get("due_date"))
+    st.session_state[K_START] = start_parsed or date.today()
+    st.session_state[K_DUE] = due_parsed or date.today()
+    st.session_state[K_NO_START] = start_parsed is None
+    st.session_state[K_NO_DUE] = due_parsed is None
 
     st.session_state[K_DESC] = str(loaded.get("description") or "")
     st.session_state._loaded_id = loaded.get("id")
 
-# If we switched to <New>, reset once
+# If switched to <New>, reset once
 if not loaded and st.session_state._loaded_id is not None and st.session_state.current_project_id is None:
     for k, v in default_state.items():
         st.session_state[k] = v
     st.session_state._loaded_id = None
 
-# ---- Form (button clicks read here; state changes handled AFTER form) ----
+# ---- Form (read clicks; mutate state after form) ----
 with st.form("project_form", clear_on_submit=False):
     lc1, lc2 = st.columns(2)
 
-    # Name / Pillar / Priority (left)
-    name = lc1.text_input("Name*", key=K_NAME)
-    pillar = lc1.selectbox("Pillar*", options=[""] + pillar_values, key=K_PILLAR)
-    priority = lc1.number_input("Priority", min_value=1, max_value=99, step=1, key=K_PRIORITY)
+    # Left: Name / Pillar / Priority
+    lc1.text_input("Name*", key=K_NAME)
+    lc1.selectbox("Pillar*", options=[""] + pillar_values, key=K_PILLAR)
+    lc1.number_input("Priority", min_value=1, max_value=99, step=1, key=K_PRIORITY)
 
-    # Owner / Status / Dates (right)
-    owner = lc2.text_input("Owner", key=K_OWNER)
-    status = lc2.selectbox("Status", options=status_values, key=K_STATUS)
+    # Right: Owner / Status / Dates
+    lc2.text_input("Owner", key=K_OWNER)
+    lc2.selectbox("Status", options=status_values, key=K_STATUS)
 
-    # Date inputs with "No date" checkboxes
-    # Streamlit date_input requires a date; we use today's date when "No date" is checked,
-    # then ignore it when saving if the checkbox is set.
-    no_start = lc2.checkbox("No Start Date", key=K_NO_START)
-    start_val = st.session_state[K_START] or date.today()
-    start_dt = lc2.date_input("Start", value=start_val, format="YYYY-MM-DD", key=K_START)
+    # Dates with "No date" checkboxes; we always keep a date in the widget but ignore on save if "No ..." checked
+    lc2.checkbox("No Start Date", key=K_NO_START)
+    lc2.date_input("Start", value=st.session_state[K_START], format="YYYY-MM-DD", key=K_START)
 
-    no_due = lc2.checkbox("No Due Date", key=K_NO_DUE)
-    due_val = st.session_state[K_DUE] or date.today()
-    due_dt = lc2.date_input("Due", value=due_val, format="YYYY-MM-DD", key=K_DUE)
+    lc2.checkbox("No Due Date", key=K_NO_DUE)
+    lc2.date_input("Due", value=st.session_state[K_DUE], format="YYYY-MM-DD", key=K_DUE)
 
-    # Description full width
-    description = st.text_area("Description", height=120, key=K_DESC)
+    # Description
+    st.text_area("Description", height=120, key=K_DESC)
 
     st.write("")  # spacer
     bcol1, bcol2, bcol3, bcol4, bcol5 = st.columns([1, 1, 1, 1, 2])
@@ -310,7 +308,7 @@ with st.form("project_form", clear_on_submit=False):
     delete_clicked  = bcol4.form_submit_button("Delete")
     clear_clicked   = bcol5.form_submit_button("Clear")
 
-# Build a clean record from current widget values (outside the form)
+# Build record to persist (outside the form)
 start_out: Optional[str] = None if st.session_state[K_NO_START] else to_iso(try_date(st.session_state[K_START]))
 due_out: Optional[str] = None if st.session_state[K_NO_DUE] else to_iso(try_date(st.session_state[K_DUE]))
 
@@ -332,7 +330,7 @@ def missing_required(r: Dict[str, Any]) -> Optional[str]:
         return "Pillar is required."
     return None
 
-# ---- Button handlers (run AFTER the form to avoid widget mutation conflicts) ----
+# ---- Button handlers (after form to avoid mutation conflicts) ----
 if new_clicked:
     st.session_state.current_project_id = None
     for k, v in default_state.items():
@@ -431,29 +429,6 @@ filters = dict(
 
 data = fetch_df(filters)
 
-# ---- CSV Export (Filtered & All) ----
-st.markdown("---")
-st.subheader("Export")
-exp1, exp2 = st.columns([1, 1])
-
-csv_filtered = data.to_csv(index=False).encode("utf-8")
-exp1.download_button(
-    label="Export Filtered CSV",
-    data=csv_filtered,
-    file_name=f"projects_filtered_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-    mime="text/csv",
-)
-
-with conn() as c:
-    df_all = pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY name COLLATE NOCASE", c)
-csv_all = df_all.to_csv(index=False).encode("utf-8")
-exp2.download_button(
-    label="Export ALL CSV",
-    data=csv_all,
-    file_name=f"projects_all_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-    mime="text/csv",
-)
-
 # ---- Derived Years ----
 data["start_year"] = pd.to_datetime(data["start_date"], errors="coerce").dt.year
 data["due_year"] = pd.to_datetime(data["due_date"], errors="coerce").dt.year
@@ -498,7 +473,7 @@ if show_kpi:
 if show_pillar_chart:
     st.markdown("---")
     status_df = data.copy()
-apply(
+    status_df["state"] = status_df["status"].apply(
         lambda x: "Completed" if str(x).lower() == "done" else "Ongoing"
     )
 
@@ -556,3 +531,26 @@ if show_roadmap:
 st.markdown("---")
 st.subheader("Projects")
 st.dataframe(data, use_container_width=True)
+
+# ---- CSV Export (Filtered & All) ----
+st.markdown("---")
+st.subheader("Export")
+
+exp1, exp2 = st.columns([1, 1])
+csv_filtered = data.to_csv(index=False).encode("utf-8")
+exp1.download_button(
+    label="Export Filtered CSV",
+    data=csv_filtered,
+    file_name=f"projects_filtered_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+    mime="text/csv",
+)
+
+with conn() as c:
+    df_all = pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY name COLLATE NOCASE", c)
+csv_all = df_all.to_csv(index=False).encode("utf-8")
+exp2.download_button(
+    label="Export ALL CSV",
+    data=csv_all,
+    file_name=f"projects_all_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+    mime="text/csv",
+)
