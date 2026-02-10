@@ -108,7 +108,14 @@ owner_list = distinct_values("owner")
 
 with st.form("project_form"):
     c1, c2 = st.columns(2)
+# ---- ACTION BUTTONS (outside the form) ----
+bcol1, bcol2, bcol3, bcol4, bcol5 = st.columns([1, 1, 1, 1, 2])
 
+new_clicked    = bcol1.button("New")
+save_clicked   = bcol2.button("Save (Insert)")
+update_clicked = bcol3.button("Update")
+delete_clicked = bcol4.button("Delete")
+clear_clicked  = bcol5.button("Clear")
     # LEFT COLUMN
 # Pre-fill fields if editing
 name_val = loaded_project["name"] if loaded_project else ""
