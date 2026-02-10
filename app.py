@@ -260,10 +260,10 @@ if st.session_state["current_project_id"]:
 
         st.session_state[K_DESC] = rec.get("description", "")
         st.session_state["_loaded_id"] = rec["id"]
-
+pillar_list = distinct_values("pillar")
 # ---------- FORM ----------
 with st.form("project_form"):
-    pillar_list = distinct_values("pillar")
+    
     c1, c2 = st.columns(2)
 
     c1.text_input("Name*", key=K_NAME)
