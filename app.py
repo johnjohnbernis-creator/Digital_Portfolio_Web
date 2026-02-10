@@ -50,7 +50,7 @@ def _rerun():
 def ensure_schema():
     """
     Create table if it doesn't exist. If your DB already exists with a different schema,
-    comment this out and adapt CRUD below to match your columns.
+    this won't change it; it only creates when missing.
     """
     with conn() as c:
         c.execute(
@@ -190,6 +190,39 @@ st.subheader("Project")
 if "current_project_id" not in st.session_state:
     st.session_state.current_project_id = None
 
+# Stable widget keys so we can clear/reset reliably
+K_NAME = "w_name"
+K_PILLAR = "w_pillar"
+K_PRIORITY = "w_priority"
+K_OWNER = "w_owner"
+K_STATUS = "w_status"
+K_START = "w_start"
+K_DUE = "w_due"
+K_DESC = "w_desc"
+
+def _reset_widget_defaults():
+    st.session_state[K_NAME] = ""
+    st.session_state[K_PILLAR] = ""
+    st.session_state[K_PRIORITY] = 3
+    st.session_state[K_OWNER] = ""
+    st.session_state[K_STATUS] = "Idea"
+    st.session_state[K_START] = ""
+    st.session_state[K_DUE] = ""
+    st.session_state[K_DESC] = ""
+
+# Prime defaults if first load
+for k, v in {
+    K_NAME: "",
+    K_PILLAR: "",
+    K_PRIORITY: 3,
+    K_OWNER: "",
+    K_STATUS: "Idea",
+    K_START: "",
+    K_DUE: "",
+    K_DESC: "",
+}.items():
+    st.session_state.setdefault(k, v)
+
 # Select existing project to load or start new
 with conn() as c:
     df_names = pd.read_sql_query(
@@ -211,40 +244,50 @@ else:
 
 loaded = fetch_one_by_id(st.session_state.current_project_id) if st.session_state.current_project_id else {}
 
-# Inputs arranged roughly like your screenshot
+# When we load a record, populate widget values (one-time on each selection)
+def _populate_from_loaded():
+    if not loaded:
+        return
+    st.session_state[K_NAME] = str(loaded.get("name") or "")
+    st.session_state[K_PILLAR] = str(loaded.get("pillar") or "")
+    st.session_state[K_PRIORITY] = _safe_int(loaded.get("priority"), 3)
+    st.session_state[K_OWNER] = str(loaded.get("owner") or "")
+    st.session_state[K_STATUS] = str(loaded.get("status") or "Idea")
+    st.session_state[K_START] = str(loaded.get("start_date") or "")
+    st.session_state[K_DUE] = str(loaded.get("due_date") or "")
+    st.session_state[K_DESC] = str(loaded.get("description") or "")
+
+# Populate when switching selection to an existing record
+if st.session_state.current_project_id and loaded:
+    _populate_from_loaded()
+elif st.session_state.current_project_id is None and sel == "<New Project>":
+    # Ensure clean slate when selecting New
+    _reset_widget_defaults()
+
 with st.form("project_form", clear_on_submit=False):
     lc1, lc2 = st.columns(2)
 
     # Name / Pillar / Priority (left)
-    name = lc1.text_input("Name*", value=str(loaded.get("name", "")))
-
-    # Pillar options from data; include loaded value if it's custom
-    pillar_options = sorted(set([""] + distinct_values("pillar")))
-    if loaded.get("pillar") and loaded["pillar"] not in pillar_options:
-        pillar_options.append(loaded["pillar"])
-    pillar_index = pillar_options.index(loaded["pillar"]) if loaded.get("pillar") in pillar_options else 0
-    pillar = lc1.selectbox("Pillar*", options=pillar_options, index=pillar_index)
-
-    priority_default = _safe_int(loaded.get("priority"), 3)
-    priority = lc1.number_input("Priority", min_value=1, max_value=99, value=priority_default, step=1)
+    name = lc1.text_input("Name*", key=K_NAME)
+    # Pillar options from data; include current value and empty
+    pillar_values = distinct_values("pillar")
+    if st.session_state[K_PILLAR] and st.session_state[K_PILLAR] not in pillar_values:
+        pillar_values = [st.session_state[K_PILLAR]] + pillar_values
+    pillar = lc1.selectbox("Pillar*", options=[""] + pillar_values, key=K_PILLAR)
+    priority = lc1.number_input("Priority", min_value=1, max_value=99, step=1, key=K_PRIORITY)
 
     # Owner / Status / Dates (right)
-    owner = lc2.text_input("Owner", value=str(loaded.get("owner", "")))
-
+    owner = lc2.text_input("Owner", key=K_OWNER)
     status_defaults = ["Idea", "Planned", "In Progress", "Blocked", "Done"]
-    for s in distinct_values("status"):
-        if s not in status_defaults:
-            status_defaults.append(s)
-    status_index = status_defaults.index(loaded.get("status")) if loaded.get("status") in status_defaults else 0
-    status = lc2.selectbox("Status", options=status_defaults, index=status_index)
-
-    start_date = lc2.text_input("Start (YYYY-MM-DD)", value=str(loaded.get("start_date") or ""))
-    due_date = lc2.text_input("Due (YYYY-MM-DD)", value=str(loaded.get("due_date") or ""))
+    dyn_statuses = [s for s in distinct_values("status") if s not in status_defaults]
+    status = lc2.selectbox("Status", options=status_defaults + dyn_statuses, key=K_STATUS)
+    start_date = lc2.text_input("Start (YYYY-MM-DD)", key=K_START)
+    due_date = lc2.text_input("Due (YYYY-MM-DD)", key=K_DUE)
 
     # Description full width
-    description = st.text_area("Description", value=str(loaded.get("description", "")), height=120)
+    description = st.text_area("Description", height=120, key=K_DESC)
 
-    # --- Button row (as requested) ---
+    # --- Button row ---
     st.write("")  # small spacer
     bcol1, bcol2, bcol3, bcol4, bcol5 = st.columns([1, 1, 1, 1, 2])
     new_clicked     = bcol1.form_submit_button("New")
@@ -253,14 +296,14 @@ with st.form("project_form", clear_on_submit=False):
     delete_clicked  = bcol4.form_submit_button("Delete")
     clear_clicked   = bcol5.form_submit_button("Clear")
 
-    # Pack current form values
+    # Pack current form values (normalize dates)
     rec = dict(
-        name=name.strip(),
-        pillar=pillar.strip(),
-        priority=priority,
-        description=description.strip(),
-        owner=owner.strip(),
-        status=status.strip(),
+        name=(name or "").strip(),
+        pillar=(pillar or "").strip(),
+        priority=_safe_int(priority, None),
+        description=(description or "").strip(),
+        owner=(owner or "").strip(),
+        status=(status or "").strip(),
         start_date=to_iso(try_date(start_date)) if try_date(start_date) else (start_date.strip() or None),
         due_date=to_iso(try_date(due_date)) if try_date(due_date) else (due_date.strip() or None),
     )
@@ -275,6 +318,7 @@ with st.form("project_form", clear_on_submit=False):
     # --- Button handlers ---
     if new_clicked:
         st.session_state.current_project_id = None
+        _reset_widget_defaults()
         st.success("New project started. Fill the fields and click 'Save (Insert)'.")
         _rerun()
 
@@ -283,10 +327,20 @@ with st.form("project_form", clear_on_submit=False):
         if err:
             st.error(err)
             st.stop()
-        new_id = insert_project(rec)
-        st.session_state.current_project_id = new_id
-        st.success(f"Project inserted with id {new_id}.")
-        _rerun()
+        try:
+            new_id = insert_project(rec)
+            st.session_state.current_project_id = new_id
+            st.success(f"Project inserted with id {new_id}.")
+            _rerun()
+        except sqlite3.IntegrityError as e:
+            st.error("Insert failed due to a database integrity constraint. "
+                     "Please ensure required fields are filled and any unique constraints are satisfied.")
+            st.exception(e)
+            st.stop()
+        except Exception as e:
+            st.error("Unexpected error while inserting the project.")
+            st.exception(e)
+            st.stop()
 
     if update_clicked:
         if not st.session_state.current_project_id:
@@ -296,22 +350,38 @@ with st.form("project_form", clear_on_submit=False):
         if err:
             st.error(err)
             st.stop()
-        update_project(st.session_state.current_project_id, rec)
-        st.success(f"Project {st.session_state.current_project_id} updated.")
-        _rerun()
+        try:
+            update_project(st.session_state.current_project_id, rec)
+            st.success(f"Project {st.session_state.current_project_id} updated.")
+            _rerun()
+        except sqlite3.IntegrityError as e:
+            st.error("Update failed due to a database integrity constraint.")
+            st.exception(e)
+            st.stop()
+        except Exception as e:
+            st.error("Unexpected error while updating the project.")
+            st.exception(e)
+            st.stop()
 
     if delete_clicked:
         if not st.session_state.current_project_id:
             st.warning("No project is loaded to delete.")
             st.stop()
-        delete_project(st.session_state.current_project_id)
-        st.session_state.current_project_id = None
-        st.success("Project deleted.")
-        _rerun()
+        try:
+            delete_project(st.session_state.current_project_id)
+            st.session_state.current_project_id = None
+            _reset_widget_defaults()
+            st.success("Project deleted.")
+            _rerun()
+        except Exception as e:
+            st.error("Unexpected error while deleting the project.")
+            st.exception(e)
+            st.stop()
 
     if clear_clicked:
-        # Clear fields by resetting loaded id and re-running
+        # Clear fields but keep the selection as <New Project>
         st.session_state.current_project_id = None
+        _reset_widget_defaults()
         st.success("Cleared fields.")
         _rerun()
 
@@ -344,6 +414,31 @@ filters = dict(
 )
 
 data = fetch_df(filters)
+
+# ---- CSV Export (Filtered & All) ----
+st.markdown("---")
+st.subheader("Export")
+exp1, exp2 = st.columns([1, 1])
+
+# Export filtered
+csv_filtered = data.to_csv(index=False).encode("utf-8")
+exp1.download_button(
+    label="Export Filtered CSV",
+    data=csv_filtered,
+    file_name=f"projects_filtered_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+    mime="text/csv",
+)
+
+# Export all (no filters)
+with conn() as c:
+    df_all = pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY name COLLATE NOCASE", c)
+csv_all = df_all.to_csv(index=False).encode("utf-8")
+exp2.download_button(
+    label="Export ALL CSV",
+    data=csv_all,
+    file_name=f"projects_all_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+    mime="text/csv",
+)
 
 # ---- Derived Years ----
 data["start_year"] = pd.to_datetime(data["start_date"], errors="coerce").dt.year
@@ -445,7 +540,6 @@ if show_roadmap:
         st.plotly_chart(fig, use_container_width=True)
 
 # ---- Projects Table ----
-if show_table:
-    st.markdown("---")
-    st.subheader("Projects")
-    st.dataframe(data, use_container_width=True)
+st.markdown("---")
+st.subheader("Projects")
+st.dataframe(data, use_container_width=True)
