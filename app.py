@@ -1,50 +1,30 @@
 # Digital Portfolio — Web HMI + Report & Roadmap (Streamlit)
 # ----------------------------------------------------------
 import os
+import io
 import sqlite3
 from datetime import datetime, date
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 
 import pandas as pd
 import plotly.express as px
+import plotly.io as pio
 import streamlit as st
+
+# Optional PDF support (recommended). If not installed, PDF export will be disabled.
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
+    REPORTLAB_AVAILABLE = True
+except Exception:
+    REPORTLAB_AVAILABLE = False
 
 # ------------------ Constants ------------------
 DB_PATH = "portfolio.db"
 TABLE = "projects"
 NEW_LABEL = "<New Project>"
 ALL_LABEL = "All"
-
-
-def choose_or_type(
-    label: str,
-    existing_values: List[str],
-    default_value: str = "",
-    manual_label: str = "➕ Type manually…",
-    key_prefix: str = "",
-) -> tuple[str, bool]:
-    """
-    Choose from known values or type a new one.
-    key_prefix MUST be unique per usage to avoid DuplicateWidgetID.
-    """
-    options = [manual_label] + existing_values
-
-    if default_value and default_value in existing_values:
-        idx = options.index(default_value)
-    else:
-        idx = 0
-
-    sel_key = f"{key_prefix}__select"
-    txt_key = f"{key_prefix}__text"
-
-    choice = st.selectbox(label, options, index=idx, key=sel_key)
-    if choice == manual_label:
-        typed = st.text_input(f"{label} (manual entry)", value=(default_value or ""), key=txt_key)
-        return typed.strip(), True
-    else:
-        return choice.strip(), False
-
-
 
 # ------------------ Utilities ------------------
 def conn() -> sqlite3.Connection:
@@ -126,7 +106,6 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
             try:
                 args.append(int(filters["priority"]))
             except Exception:
-                # If something odd slips in, ignore priority filter
                 where.pop()
 
         if filters.get("search"):
@@ -143,10 +122,87 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
         return pd.read_sql_query(q, c, params=args)
 
 
+def fetch_all_projects() -> pd.DataFrame:
+    with conn() as c:
+        return pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY id", c)
+
+
 def status_to_state(x: Any) -> str:
     s = str(x).strip().lower()
     return "Completed" if s in {"done", "complete", "completed"} else "Ongoing"
 
+
+def choose_or_type(
+    label: str,
+    existing_values: List[str],
+    default_value: str = "",
+    manual_label: str = "➕ Type manually…",
+    key_prefix: str = "cot",
+) -> Tuple[str, bool]:
+    """
+    Choose from existing values or type manually.
+    key_prefix MUST be unique per usage to prevent DuplicateElementId in Streamlit.
+    """
+    options = [manual_label] + existing_values
+
+    if default_value and default_value in existing_values:
+        idx = options.index(default_value)
+    else:
+        idx = 0
+
+    sel_key = f"{key_prefix}__select"
+    txt_key = f"{key_prefix}__text"
+
+    choice = st.selectbox(label, options, index=idx, key=sel_key)
+    if choice == manual_label:
+        typed = st.text_input(f"{label} (manual entry)", value=(default_value or ""), key=txt_key)
+        return typed.strip(), True
+    return choice.strip(), False
+
+
+def build_pdf_report(df: pd.DataFrame, title: str = "Digital Portfolio Report") -> bytes:
+    """
+    Build a simple printable PDF (bytes). Requires reportlab.
+    """
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("reportlab is not installed")
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(40, height - 45, title)
+
+    c.setFont("Helvetica", 10)
+    c.drawString(40, height - 65, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    c.drawString(40, height - 80, f"Rows: {len(df)}")
+
+    # Print a small preview table (first 40 rows, limited columns)
+    cols = ["id", "name", "pillar", "priority", "owner", "status", "start_date", "due_date"]
+    cols = [col for col in cols if col in df.columns]
+
+    y = height - 110
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(40, y, " | ".join(cols))
+    y -= 14
+
+    c.setFont("Helvetica", 8)
+    preview = df[cols].fillna("").head(40)
+
+    for _, row in preview.iterrows():
+        line = " | ".join(str(row[col])[:28] for col in cols)
+        c.drawString(40, y, line)
+        y -= 10
+        if y < 50:
+            c.showPage()
+            y = height - 50
+            c.setFont("Helvetica", 8)
+
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf.read()
 
 # ------------------ App Boot ------------------
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
@@ -161,11 +217,9 @@ if not os.path.exists(DB_PATH):
 st.markdown("---")
 st.subheader("Project Editor")
 
-# Keep selection stable across reruns
 if "project_selector" not in st.session_state:
     st.session_state.project_selector = NEW_LABEL
 
-# Load project list for editing
 with conn() as c:
     df_projects = pd.read_sql_query(f"SELECT id, name FROM {TABLE} ORDER BY name", c)
 
@@ -180,46 +234,39 @@ selected_project = st.selectbox(
     key="project_selector",
 )
 
-# Resolve selected project record
 loaded_project = None
 if selected_project != NEW_LABEL:
     try:
         project_id = int(selected_project.split(" — ")[0])
         with conn() as c:
-            df = pd.read_sql_query(
-                f"SELECT * FROM {TABLE} WHERE id=?", c, params=[project_id]
-            )
-            if not df.empty:
-                loaded_project = df.iloc[0].to_dict()
+            df = pd.read_sql_query(f"SELECT * FROM {TABLE} WHERE id=?", c, params=[project_id])
+        if not df.empty:
+            loaded_project = df.iloc[0].to_dict()
     except Exception:
         loaded_project = None
 
-# Load dropdown value sets
 pillar_list = distinct_values("pillar")
 status_list = distinct_values("status")
 owner_list = distinct_values("owner")
 
-# ---------- Non-form buttons (page-level actions) ----------
 bcol1, bcol2 = st.columns([1, 1])
-new_clicked = bcol1.button("New")
-clear_clicked = bcol2.button("Clear")
+new_clicked = bcol1.button("New", key="btn_new_project")
+clear_clicked = bcol2.button("Clear Filters", key="btn_clear_filters")
 
 if new_clicked:
     st.session_state.project_selector = NEW_LABEL
     st.rerun()
 
 if clear_clicked:
-    # Clear search & filters below (set by keys later)
     for k in ["pillar_f", "status_f", "owner_f", "priority_f", "search_f"]:
         if k in st.session_state:
             del st.session_state[k]
     st.toast("Cleared filters.", icon="✅")
 
 # ------------------ Form (inputs + submit buttons) ------------------
-wwith st.form("project_form"):
+with st.form("project_form"):
     c1, c2 = st.columns(2)
 
-    # Defaults for form fields
     name_val = loaded_project.get("name") if loaded_project else ""
     pillar_val = loaded_project.get("pillar") if loaded_project else ""
     priority_val = int(loaded_project.get("priority", 5)) if loaded_project else 5
@@ -229,11 +276,10 @@ wwith st.form("project_form"):
     due_val = try_date(loaded_project.get("due_date")) if loaded_project else date.today()
     desc_val = loaded_project.get("description") if loaded_project else ""
 
-    # ---- LEFT COLUMN ----
     with c1:
         project_name = st.text_input("Name*", value=name_val, key="editor_name")
 
-        project_pillar, pillar_used_manual = choose_or_type(
+        project_pillar, _ = choose_or_type(
             label="Pillar*",
             existing_values=pillar_list,
             default_value=pillar_val or "",
@@ -246,9 +292,8 @@ wwith st.form("project_form"):
 
         description = st.text_area("Description", value=desc_val, height=120, key="editor_desc")
 
-    # ---- RIGHT COLUMN ----
     with c2:
-        project_owner, owner_used_manual = choose_or_type(
+        project_owner, _ = choose_or_type(
             label="Owner",
             existing_values=owner_list,
             default_value=owner_val or "",
@@ -260,31 +305,62 @@ wwith st.form("project_form"):
             [""] + status_list,
             index=safe_index([""] + status_list, status_val),
             key="editor_status",
-        )  # selectbox supports key [1](https://peerdh.com/blogs/programming-insights/streamlits-download-button-a-comprehensive-guide)
+        )
 
         start_date = st.date_input("Start Date", value=start_val, key="editor_start")
         due_date = st.date_input("Due Date", value=due_val, key="editor_due")
 
-    # ---- FORM SUBMIT BUTTONS ----
-    col_a, col_b, col_c = st.columns(3)
-    submitted_new = col_a.form_submit_button("Save New")
-    submitted_update = col_b.form_submit_button("Update")
-    submitted_delete = col_c.form_submit_button("Delete")
-        project_status = st.selectbox(
-            "Status", [""] + status_list, index=safe_index([""] + status_list, status_val)
-        )
-        start_date = st.date_input("Start Date", value=start_val)
-        due_date = st.date_input("Due Date", value=due_val)
-
-    # ---- FORM SUBMIT BUTTONS ----
     col_a, col_b, col_c = st.columns(3)
     submitted_new = col_a.form_submit_button("Save New")
     submitted_update = col_b.form_submit_button("Update")
     submitted_delete = col_c.form_submit_button("Delete")
 
-    # ------------- CRUD ACTIONS (on submit) -------------
-    # CREATE
-    if submitted_new:
+# ---- CRUD ACTIONS (outside form block is OK; they use submitted_* flags) ----
+if submitted_new:
+    errors = []
+    if not project_name:
+        errors.append("Name is required.")
+    if not project_pillar:
+        errors.append("Pillar is required.")
+    if not project_owner:
+        errors.append("Owner is required.")
+
+    if errors:
+        st.error(" ".join(errors))
+    else:
+        with conn() as c:
+            c.execute(
+                f"""
+                INSERT INTO {TABLE}
+                (name, pillar, priority, description, owner, status, start_date, due_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_name.strip(),
+                    project_pillar.strip(),
+                    int(project_priority),
+                    description.strip(),
+                    project_owner.strip(),
+                    project_status.strip(),
+                    to_iso(start_date),
+                    to_iso(due_date),
+                ),
+            )
+            c.commit()
+
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+
+        st.success("Project created!")
+        st.session_state.project_selector = NEW_LABEL
+        st.rerun()
+
+if submitted_update:
+    if not loaded_project:
+        st.warning("Select an existing project to update.")
+    else:
         errors = []
         if not project_name:
             errors.append("Name is required.")
@@ -299,9 +375,9 @@ wwith st.form("project_form"):
             with conn() as c:
                 c.execute(
                     f"""
-                    INSERT INTO {TABLE}
-                    (name, pillar, priority, description, owner, status, start_date, due_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    UPDATE {TABLE}
+                    SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?
+                    WHERE id=?
                     """,
                     (
                         project_name.strip(),
@@ -312,76 +388,35 @@ wwith st.form("project_form"):
                         project_status.strip(),
                         to_iso(start_date),
                         to_iso(due_date),
+                        int(loaded_project["id"]),
                     ),
                 )
                 c.commit()
-            # Make sure new Owner appears in dropdowns immediately
+
             try:
                 st.cache_data.clear()
             except Exception:
                 pass
-            st.success("Project created!")
-            st.session_state.project_selector = NEW_LABEL
+
+            st.success("Project updated!")
             st.rerun()
 
-    # UPDATE
-    if submitted_update:
-        if not loaded_project:
-            st.warning("Select an existing project to update.")
-        else:
-            errors = []
-            if not project_name:
-                errors.append("Name is required.")
-            if not project_pillar:
-                errors.append("Pillar is required.")
-            if not project_owner:
-                errors.append("Owner is required.")
+if submitted_delete:
+    if not loaded_project:
+        st.warning("Select an existing project to delete.")
+    else:
+        with conn() as c:
+            c.execute(f"DELETE FROM {TABLE} WHERE id=?", (int(loaded_project["id"]),))
+            c.commit()
 
-            if errors:
-                st.error(" ".join(errors))
-            else:
-                with conn() as c:
-                    c.execute(
-                        f"""
-                        UPDATE {TABLE}
-                        SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?
-                        WHERE id=?
-                        """,
-                        (
-                            project_name.strip(),
-                            project_pillar.strip(),
-                            int(project_priority),
-                            description.strip(),
-                            project_owner.strip(),
-                            project_status.strip(),
-                            to_iso(start_date),
-                            to_iso(due_date),
-                            int(loaded_project["id"]),
-                        ),
-                    )
-                    c.commit()
-                try:
-                    st.cache_data.clear()
-                except Exception:
-                    pass
-                st.success("Project updated!")
-                st.rerun()
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
 
-    # DELETE
-    if submitted_delete:
-        if not loaded_project:
-            st.warning("Select an existing project to delete.")
-        else:
-            with conn() as c:
-                c.execute("DELETE FROM {table} WHERE id=?".format(table=TABLE), (int(loaded_project["id"]),))
-                c.commit()
-            try:
-                st.cache_data.clear()
-            except Exception:
-                pass
-            st.warning("Project deleted.")
-            st.session_state.project_selector = NEW_LABEL
-            st.rerun()
+        st.warning("Project deleted.")
+        st.session_state.project_selector = NEW_LABEL
+        st.rerun()
 
 # ------------------ Global Filters ------------------
 st.markdown("---")
@@ -393,7 +428,6 @@ pillars = [ALL_LABEL] + distinct_values("pillar")
 statuses = [ALL_LABEL] + distinct_values("status")
 owners = [ALL_LABEL] + distinct_values("owner")
 
-# Priority distinct as numeric sorted options
 priority_vals: List[int] = []
 try:
     pv = distinct_values("priority")
@@ -408,18 +442,9 @@ owner_f = colF3.selectbox("Owner", owners, key="owner_f")
 priority_f = colF4.selectbox("Priority", priority_opts, key="priority_f")
 search_f = colF6.text_input("Search", key="search_f")
 
-filters = dict(
-    pillar=pillar_f,
-    status=status_f,
-    owner=owner_f,
-    priority=priority_f,
-    search=search_f,
-)
-
+filters = dict(pillar=pillar_f, status=status_f, owner=owner_f, priority=priority_f, search=search_f)
 data = fetch_df(filters)
 
-# ------------------ Derived Years ------------------
-# Gracefully handle missing columns
 for col in ["start_date", "due_date", "pillar", "status", "name", "description"]:
     if col not in data.columns:
         data[col] = ""
@@ -433,23 +458,22 @@ st.subheader("Report Controls")
 
 rc1, rc2, rc3, rc4 = st.columns([1, 1, 1, 2])
 
-year_mode = rc1.radio("Year Type", ["Start Year", "Due Year"])
+year_mode = rc1.radio("Year Type", ["Start Year", "Due Year"], key="year_mode")
 year_col = "start_year" if year_mode == "Start Year" else "due_year"
 
 years = [ALL_LABEL] + sorted(data[year_col].dropna().astype(int).unique().tolist())
-year_f = rc2.selectbox("Year", years)
+year_f = rc2.selectbox("Year", years, key="year_f")
 
-top_n = rc3.slider("Top N per Pillar", min_value=1, max_value=10, value=5)
+top_n = rc3.slider("Top N per Pillar", min_value=1, max_value=10, value=5, key="top_n")
 
-show_all = rc4.checkbox("Show ALL Reports", value=True)
+show_all = rc4.checkbox("Show ALL Reports", value=True, key="show_all_reports")
 
-# Individual toggles when not showing all
 if not show_all:
     cK1, cK2, cK3, cK4 = st.columns(4)
-    show_kpi = cK1.checkbox("KPI Cards", True)
-    show_pillar_chart = cK2.checkbox("Pillar Status Chart", True)
-    show_roadmap = cK3.checkbox("Roadmap", True)
-    show_table = cK4.checkbox("Projects Table", True)
+    show_kpi = cK1.checkbox("KPI Cards", True, key="show_kpi")
+    show_pillar_chart = cK2.checkbox("Pillar Status Chart", True, key="show_pillar_chart")
+    show_roadmap = cK3.checkbox("Roadmap", True, key="show_roadmap")
+    show_table = cK4.checkbox("Projects Table", True, key="show_table")
 else:
     show_kpi = show_pillar_chart = show_roadmap = show_table = True
 
@@ -491,7 +515,7 @@ if show_pillar_chart:
                 barmode="group",
                 title="Projects by Pillar — Completed vs Ongoing",
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="pillar_status_chart")
         else:
             st.info("No data available for pillar chart.")
     else:
@@ -513,15 +537,19 @@ else:
     st.info("No projects to display for Top N.")
 
 # ------------------ Roadmap ------------------
+roadmap_fig = None
+
 if show_roadmap:
     st.markdown("---")
     st.subheader("Roadmap")
+
     gantt = data.copy()
     gantt["Start"] = pd.to_datetime(gantt["start_date"], errors="coerce")
     gantt["Finish"] = pd.to_datetime(gantt["due_date"], errors="coerce")
     gantt = gantt.dropna(subset=["Start", "Finish"])
+
     if not gantt.empty:
-        fig = px.timeline(
+        roadmap_fig = px.timeline(
             gantt,
             x_start="Start",
             x_end="Finish",
@@ -529,8 +557,8 @@ if show_roadmap:
             color="pillar",
             title="Project Timeline",
         )
-        fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig, use_container_width=True)
+        roadmap_fig.update_yaxes(autorange="reversed")
+        st.plotly_chart(roadmap_fig, use_container_width=True, key="roadmap_chart")
     else:
         st.info("No valid date ranges to draw the roadmap.")
 
@@ -542,35 +570,63 @@ if show_table:
         st.dataframe(data, use_container_width=True)
     else:
         st.info("No projects match your current filters.")
-# ------------------ Export CSV ------------------
-st.markdown("### Export Options")
 
-csv_data = data.to_csv(index=False).encode("utf-8")
+# ------------------ Export Options (OUTSIDE any form) ------------------
+st.markdown("---")
+st.subheader("Export Options")
 
+# Filtered CSV
+filtered_csv = data.to_csv(index=False).encode("utf-8")
 st.download_button(
-    label="📥 Download CSV Report",
-    data=csv_data,
-    file_name="digital_portfolio_report.csv",
+    label="⬇️ Download CSV Report (Filtered)",
+    data=filtered_csv,
+    file_name="portfolio_filtered.csv",
     mime="text/csv",
+    key="export_csv_filtered",
 )
 
-# ------------------ Print Report Button ------------------
-if st.button("🖨️ Print Report (PDF)"):
-    st.markdown(
-        """
-        <script>
-        window.print();
-        </script>
-        """,
-        unsafe_allow_html=True,
-    )
-# ------------------ Print Report Button ------------------
-if st.button("🖨️ Print Report (PDF)"):
-    st.markdown(
-        """
-        <script>
-        window.print();
-        </script>
-        """,
-        unsafe_allow_html=True,
-    )
+# Full DB CSV
+full_df = fetch_all_projects()
+full_csv = full_df.to_csv(index=False).encode("utf-8")
+st.download_button(
+    label="🗄️ Download FULL Database (CSV)",
+    data=full_csv,
+    file_name="portfolio_full_database.csv",
+    mime="text/csv",
+    key="export_csv_full_db",
+)
+
+# Printable PDF (Filtered) — reliable "Print Report"
+if REPORTLAB_AVAILABLE:
+    try:
+        pdf_bytes = build_pdf_report(data, title="Digital Portfolio Report (Filtered)")
+        st.download_button(
+            label="🖨️ Download Printable Report (PDF)",
+            data=pdf_bytes,
+            file_name="portfolio_report_filtered.pdf",
+            mime="application/pdf",
+            key="export_pdf_filtered",
+        )
+    except Exception as e:
+        st.warning(f"PDF export failed: {e}")
+else:
+    st.info("PDF export disabled (reportlab not installed).")
+
+# Roadmap image export (PNG)
+if roadmap_fig is not None:
+    st.markdown("#### Export Roadmap Image")
+    try:
+        # Requires Kaleido/Chrome in the runtime environment.
+        img_bytes = pio.to_image(roadmap_fig, format="png", scale=2)
+        st.download_button(
+            "📸 Download Roadmap as PNG",
+            data=img_bytes,
+            file_name="roadmap.png",
+            mime="image/png",
+            key="export_roadmap_png",
+        )
+    except Exception as e:
+        st.warning(
+            "Roadmap image export failed. This typically means Kaleido/Chrome isn't available. "
+            f"Error: {e}"
+        )
