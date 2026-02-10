@@ -4,7 +4,7 @@
 import os
 import sqlite3
 from datetime import datetime, date
-from typing import List, Dict, Optional, Any, Union
+from typing import List, Dict, Optional, Any
 
 import pandas as pd
 import plotly.express as px
@@ -14,105 +14,47 @@ DB_PATH = "portfolio.db"
 TABLE = "projects"
 
 
-# ---------- DB Utilities ----------
+# ---------- Utilities ----------
 def conn() -> sqlite3.Connection:
-    """Return a SQLite DB connection."""
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
-def ensure_table() -> bool:
-    """Return True if the projects table exists."""
-    try:
-        with conn() as c:
-            cur = c.cursor()
-            cur.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                (TABLE,),
-            )
-            return cur.fetchone() is not None
-    except Exception:
-        return False
-
-
-def bootstrap_db(seed: bool = True) -> None:
-    """Create table + indexes; optionally seed demo rows."""
+def safe_migrate():
+    """Add missing columns safely."""
     with conn() as c:
         cur = c.cursor()
+
+        # Add progress column
         cur.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {TABLE} (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                pillar TEXT,
-                priority INTEGER,
-                description TEXT,
-                owner TEXT,
-                status TEXT,
-                start_date TEXT,
-                due_date TEXT
-            );
-            """
+            "SELECT name FROM pragma_table_info('projects') WHERE name='progress';"
         )
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE projects ADD COLUMN progress INTEGER DEFAULT 0;")
 
-        # Indexes
-        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_pillar ON {TABLE}(pillar);")
-        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_status ON {TABLE}(status);")
-        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_owner ON {TABLE}(owner);")
-        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_priority ON {TABLE}(priority);")
-        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_start ON {TABLE}(start_date);")
-        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_due ON {TABLE}(due_date);")
-
-        if seed:
-            cur.execute(f"SELECT COUNT(*) FROM {TABLE}")
-            if cur.fetchone()[0] == 0:
-                rows = [
-                    ("Site HMI Overhaul", "Operations", 1, "Revamp line HMI screens", "J. Bernis",
-                     "Active", "2026-01-15", "2026-03-31"),
-                    ("DMS Rewards", "Quality", 2, "Rewards dashboard in DMS", "M. Upadhaya",
-                     "Planned", "2026-02-01", "2026-04-15"),
-                    ("Spool Tracking POC", "Manufacturing", 3, "RFID tracking for spools", "U. Otaluka",
-                     "Active", "2026-02-10", "2026-05-01"),
-                    ("Enable Distribution API", "IT", 2, "Expose distribution endpoints", "G. Akin",
-                     "Blocked", "2026-02-05", "2026-03-15"),
-                    ("Reminder Notifications", "IT", 4, "Email / app reminders", "L. Van Hekken",
-                     "Planned", "2026-03-01", "2026-04-01"),
-                ]
-                cur.executemany(
-                    f"""
-                    INSERT INTO {TABLE}
-                    (name, pillar, priority, description, owner, status, start_date, due_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    rows,
-                )
+        # Add progress_status column
+        cur.execute(
+            "SELECT name FROM pragma_table_info('projects') WHERE name='progress_status';"
+        )
+        if not cur.fetchone():
+            cur.execute(
+                "ALTER TABLE projects ADD COLUMN progress_status TEXT DEFAULT '';"
+            )
 
 
-# ---------- Helpers ----------
-def try_date(s: Optional[str]) -> Optional[date]:
-    """Parse YYYY-MM-DD string, returning None if invalid."""
-    if not s:
-        return None
-    try:
-        return datetime.strptime(str(s), "%Y-%m-%d").date()
-    except Exception:
-        return None
+safe_migrate()
 
 
-@st.cache_data(show_spinner=False)
 def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-    """Fetch DB rows with optional filters."""
     q = f"SELECT * FROM {TABLE}"
-    args: List[Any] = []
-    where: List[str] = []
+    args, where = [], []
 
     if filters:
-        for col in ("pillar", "status", "owner"):
-            val = filters.get(col)
-            if val and val != "All":
+        for col in ["pillar", "status", "owner"]:
+            if filters.get(col) and filters[col] != "All":
                 where.append(f"{col} = ?")
-                args.append(val)
+                args.append(filters[col])
 
-        if filters.get("priority") not in (None, "All"):
+        if filters.get("priority") and filters["priority"] != "All":
             where.append("CAST(priority AS TEXT) = ?")
             args.append(str(filters["priority"]))
 
@@ -130,9 +72,7 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
         return pd.read_sql_query(q, c, params=args)
 
 
-@st.cache_data(show_spinner=False)
 def distinct_values(col: str) -> List[str]:
-    """Return sorted list of distinct non-empty values in a column."""
     with conn() as c:
         df = pd.read_sql_query(
             f"""
@@ -147,287 +87,370 @@ def distinct_values(col: str) -> List[str]:
 
 
 # ---------- Priority Color ----------
-def priority_color(p: Union[str, int, float, None]) -> str:
-    """Return color name for priority number."""
+def priority_color(p):
     try:
         p = int(p)
-    except Exception:
+    except:
         return "grey"
-
     if p == 1:
         return "red"
     if p in (2, 3):
         return "orange"
-    if 4 <= p <= 6:
+    if p in (4, 5, 6):
         return "gold"
     return "green"
 
 
 def highlight_priority(val):
-    return f"color:{priority_color(val)}; font-weight:bold;"
+    return f"color: {priority_color(val)}; font-weight:bold;"
+
+
+# ---------- Progress Color ----------
+def progress_color(p):
+    try:
+        p = int(p)
+    except:
+        return "gray"
+    if p <= 30:
+        return "red"
+    if p <= 70:
+        return "gold"
+    return "green"
 
 
 # ----------------------------------------------------------
-# Streamlit APP
+#                STREAMLIT APP
 # ----------------------------------------------------------
+
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
 st.title("Digital Portfolio — Web Version")
 
-# ---------- Sidebar ----------
-with st.sidebar:
-    st.subheader("Admin")
-
-    if not ensure_table():
-        st.warning("Table not found. Click Bootstrap.")
-
-    col_b1, col_b2 = st.columns(2)
-    seed = col_b2.checkbox("Seed sample", value=True)
-
-    if col_b1.button("Bootstrap", use_container_width=True):
-        bootstrap_db(seed)
-        fetch_df.clear()
-        distinct_values.clear()
-        st.success("Database initialized.")
-        st.rerun()
-
-    st.markdown("---")
-
-    if st.button("Show Table Structure"):
-        if ensure_table():
-            with conn() as c:
-                cur = c.cursor()
-                cur.execute(f"PRAGMA table_info({TABLE})")
-                st.code(cur.fetchall())
-        else:
-            st.info("Table does not exist.")
+if not os.path.exists(DB_PATH):
+    st.error("Database not found.")
+    st.stop()
 
 
 # ----------------------------------------------------------
-#                     TABS
+#                      TABS
 # ----------------------------------------------------------
+
 tab_editor, tab_dashboard, tab_roadmap = st.tabs(
     ["🛠 Editor", "📊 Dashboard", "🗺 Roadmap"]
 )
 
 # ----------------------------------------------------------
-#                     EDITOR TAB
+#                   TAB: EDITOR
 # ----------------------------------------------------------
+
 with tab_editor:
-    st.header("Project Editor")
 
-    if ensure_table():
+    st.markdown("## Project Editor")
+
+    with conn() as c:
+        existing = pd.read_sql_query(f"SELECT id, name FROM {TABLE} ORDER BY name", c)
+
+    options = ["New Project"] + existing["name"].tolist()
+    selected = st.selectbox("Select Project", options)
+
+    # ---------- New Project Case ----------
+    if selected == "New Project":
+        project = dict(
+            id=None,
+            name="",
+            pillar="",
+            priority=1,
+            description="",
+            owner="",
+            status="",
+            start_date="",
+            due_date="",
+            progress=0,
+            progress_status=""
+        )
+
+    else:
+        # ---------- SAFE PROJECT LOADING ----------
+        pid_row = existing[existing["name"] == selected]
+
+        if pid_row.empty:
+            st.warning("The selected project no longer exists. Refreshing…")
+            st.experimental_rerun()
+
+        pid = pid_row.iloc[0]["id"]
+
         with conn() as c:
-            df_names = pd.read_sql_query(
-                f"SELECT id, name FROM {TABLE} ORDER BY name",
-                c
-            )
+            df = pd.read_sql_query("SELECT * FROM projects WHERE id=?", c, params=[pid])
 
-        options = ["New Project"] + df_names["name"].tolist()
-        selected = st.selectbox("Select Project", options)
+        if df.empty:
+            st.warning("Project record missing. Refreshing…")
+            st.experimental_rerun()
 
-        if selected == "New Project":
-            project = {
-                "id": None,
-                "name": "",
-                "pillar": "",
-                "priority": 1,
-                "description": "",
-                "owner": "",
-                "status": "",
-                "start_date": "",
-                "due_date": ""
-            }
-        else:
-            pid = int(df_names.loc[df_names["name"] == selected, "id"].iloc[0])
-            with conn() as c:
-                df = pd.read_sql_query(
-                    f"SELECT * FROM {TABLE} WHERE id=?",
-                    c,
-                    params=[pid],
+        project = df.iloc[0].to_dict()
+
+    # ---------- Parse Dates ----------
+    def parse_date(d):
+        try:
+            return datetime.strptime(str(d), "%Y-%m-%d").date()
+        except:
+            return date.today()
+
+    start_val = parse_date(project.get("start_date"))
+    due_val = parse_date(project.get("due_date"))
+
+    colA, colB = st.columns([2, 2])
+
+    # ---------- LEFT SIDE ----------
+    with colA:
+        name = st.text_input("Name*", project["name"])
+        pillar = st.selectbox("Pillar*", [""] + distinct_values("pillar"))
+        priority = st.number_input("Priority", 1, 10, int(project["priority"] or 1))
+        description = st.text_area("Description", project.get("description", ""))
+
+    # ---------- RIGHT SIDE ----------
+    with colB:
+        owner = st.text_input("Owner", project.get("owner", ""))
+        status = st.selectbox("Status", [""] + distinct_values("status"))
+        start_date = st.date_input("Start Date", value=start_val)
+        due_date = st.date_input("Due Date", value=due_val)
+        progress = st.slider("Progress (%)", 0, 100, int(project.get("progress", 0)))
+
+        st.text_input(
+            "Update Tag (automatic)",
+            project.get("progress_status", ""),
+            disabled=True
+        )
+
+    # ---------- Clean Inputs ----------
+    start_str = start_date.strftime("%Y-%m-%d")
+    due_str = due_date.strftime("%Y-%m-%d")
+
+    pillar_clean = pillar.strip() or None
+    status_clean = status.strip() or None
+    owner_clean = owner.strip() or None
+
+    c1, c2, c3 = st.columns(3)
+
+    # ---------- SAVE ----------
+    if c1.button("New / Save"):
+
+        if not name.strip():
+            st.error("Name is required.")
+            st.stop()
+
+        if not pillar_clean:
+            st.error("Pillar is required.")
+            st.stop()
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tag = f"Updated on {now}" if project["id"] else f"Created on {now}"
+
+        with conn() as c:
+            if selected == "New Project":
+                c.execute(
+                    """
+                    INSERT INTO projects
+                    (name, pillar, priority, description, owner, status, start_date, due_date,
+                     created_at, updated_at, progress, progress_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        name, pillar_clean, priority, description, owner_clean,
+                        status_clean, start_str, due_str,
+                        now, now, progress, tag
+                    )
                 )
-            project = df.iloc[0].to_dict()
+                st.success("Project added.")
 
-        def parse(d):
-            try:
-                return datetime.strptime(str(d), "%Y-%m-%d").date()
-            except Exception:
-                return date.today()
-
-        start_val = parse(project["start_date"])
-        due_val = parse(project["due_date"])
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            name = st.text_input("Name*", project["name"])
-            pillars = [""] + distinct_values("pillar")
-            pillar = st.selectbox(
-                "Pillar*",
-                pillars,
-                index=pillars.index(project["pillar"]) if project["pillar"] in pillars else 0
-            )
-            priority = st.number_input(
-                "Priority",
-                min_value=1,
-                max_value=10,
-                value=int(project["priority"] or 1)
-            )
-            st.markdown(
-                f"<span style='color:{priority_color(priority)}; font-size:22px;'>●</span> "
-                f"<b style='color:{priority_color(priority)};'>Priority</b>",
-                unsafe_allow_html=True,
-            )
-            description = st.text_area("Description", project["description"])
-
-        with col2:
-            owner = st.text_input("Owner", project["owner"])
-            statuses = [""] + distinct_values("status")
-            status = st.selectbox(
-                "Status",
-                statuses,
-                index=statuses.index(project["status"]) if project["status"] in statuses else 0
-            )
-            start_date = st.date_input("Start", value=start_val)
-            due_date = st.date_input("Due", value=due_val)
-
-        # DB-safe values
-        pillar_clean = pillar or None
-        status_clean = status or None
-        owner_clean = owner or None
-
-        c1, c2, c3 = st.columns(3)
-
-        if c1.button("Save", use_container_width=True):
-            if not name.strip():
-                st.error("Name required.")
             else:
-                with conn() as c:
-                    if project["id"] is None:
-                        c.execute(
-                            f"""
-                            INSERT INTO {TABLE}
-                            (name, pillar, priority, description, owner, status, start_date, due_date)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                name.strip(), pillar_clean, int(priority),
-                                description.strip(), owner_clean, status_clean,
-                                start_date.strftime("%Y-%m-%d"),
-                                due_date.strftime("%Y-%m-%d")
-                            ),
-                        )
-                    else:
-                        c.execute(
-                            f"""
-                            UPDATE {TABLE}
-                            SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?
-                            WHERE id=?
-                            """,
-                            (
-                                name.strip(), pillar_clean, int(priority),
-                                description.strip(), owner_clean, status_clean,
-                                start_date.strftime("%Y-%m-%d"),
-                                due_date.strftime("%Y-%m-%d"),
-                                project["id"]
-                            ),
-                        )
-                fetch_df.clear()
-                distinct_values.clear()
-                st.success("Saved.")
-                st.rerun()
+                c.execute(
+                    """
+                    UPDATE projects
+                    SET name=?, pillar=?, priority=?, description=?, owner=?, status=?,
+                        start_date=?, due_date=?, updated_at=?, progress=?, progress_status=?
+                    WHERE id=?
+                    """,
+                    (
+                        name, pillar_clean, priority, description, owner_clean,
+                        status_clean, start_str, due_str,
+                        now, progress, tag, project["id"]
+                    )
+                )
+                st.success("Project updated.")
 
-        if c2.button("Delete", use_container_width=True) and project["id"]:
-            with conn() as c:
-                c.execute(f"DELETE FROM {TABLE} WHERE id=?", (project["id"],))
-            fetch_df.clear()
-            distinct_values.clear()
-            st.warning("Deleted.")
-            st.rerun()
+    # ---------- DELETE ----------
+    if c2.button("Delete") and selected != "New Project":
+        with conn() as c:
+            c.execute("DELETE FROM projects WHERE id=?", (project["id"],))
+        st.warning("Project deleted.")
 
-        if c3.button("Clear", use_container_width=True):
-            st.rerun()
-
-    else:
-        st.info("Bootstrap DB first.")
+    # ---------- CLEAR ----------
+    if c3.button("Clear"):
+        st.experimental_rerun()
 
 
 # ----------------------------------------------------------
-#                     DASHBOARD TAB
+# TAB: DASHBOARD
 # ----------------------------------------------------------
+
 with tab_dashboard:
-    st.header("Dashboard")
+    st.markdown("## Dashboard")
 
-    if ensure_table():
-        col1, col2, col3, col4, col5, col6 = st.columns([1, 1, 1, 1, 1, 2])
+    # -----------------------------------------------
+    # TOP FILTER BAR
+    # -----------------------------------------------
+    colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
 
-        pillars = ["All"] + distinct_values("pillar")
-        statuses = ["All"] + distinct_values("status")
-        owners = ["All"] + distinct_values("owner")
-        pr_vals = distinct_values("priority")
+    pillars = ["All"] + distinct_values("pillar")
+    statuses = ["All"] + distinct_values("status")
+    owners = ["All"] + distinct_values("owner")
+    priority_vals = distinct_values("priority")
+    priority_opts = ["All"] + sorted(set(priority_vals)) if priority_vals else ["All"]
 
-        def safe_int(x: str) -> Optional[int]:
-            try:
-                return int(float(x))
-            except Exception:
-                return None
+    pillar_f = colF1.selectbox("Pillar", pillars)
+    status_f = colF2.selectbox("Status", statuses)
+    owner_f = colF3.selectbox("Owner", owners)
+    priority_f = colF4.selectbox("Priority", priority_opts)
+    search_f = colF6.text_input("Search")
+    show_all = colF5.checkbox("Show ALL Reports", value=True)
 
-        pr_list = sorted({p for p in map(safe_int, pr_vals) if p is not None})
-        pr_opts = ["All"] + pr_list
+    filters = dict(
+        pillar=pillar_f,
+        status=status_f,
+        owner=owner_f,
+        priority=priority_f,
+        search=search_f
+    )
 
-        pillar_f = col1.selectbox("Pillar", pillars)
-        status_f = col2.selectbox("Status", statuses)
-        owner_f = col3.selectbox("Owner", owners)
-        pr_f = col4.selectbox("Priority", pr_opts)
-        search_f = col6.text_input("Search")
+    data = fetch_df(filters)
 
-        filters = dict(
-            pillar=pillar_f,
-            status=status_f,
-            owner=owner_f,
-            priority=pr_f,
-            search=search_f,
+    # -----------------------------------------------
+    # YEAR FILTER BLOCK
+    # -----------------------------------------------
+    st.markdown("### ")
+
+    colY1, colY2, colY3, _ = st.columns([1, 1, 2, 2])
+
+    year_mode = colY1.radio("Year Type", ["Start Year", "Due Year"])
+    year_col = "start_date" if year_mode == "Start Year" else "due_date"
+
+    data["year"] = pd.to_datetime(data[year_col], errors="coerce").dt.year
+    years = ["All"] + sorted(data["year"].dropna().astype(int).unique().tolist())
+    year_f = colY2.selectbox("Year", years)
+
+    if year_f != "All":
+        data = data[data["year"] == int(year_f)]
+
+    top_n = colY3.slider("Top N per Pillar", 1, 10, 5)
+
+    st.markdown("---")
+
+    # -----------------------------------------------
+    # METRIC COUNTERS (Option C Logic)
+    # -----------------------------------------------
+
+    data["is_completed"] = (data["status"] == "Completed") & (data["progress"] == 100)
+    data["is_ongoing"] = ~data["is_completed"]
+
+    colM1, colM2, colM3, colM4 = st.columns(4)
+
+    colM1.metric("Projects", len(data))
+    colM2.metric("Completed", int(data["is_completed"].sum()))
+    colM3.metric("Ongoing", int(data["is_ongoing"].sum()))
+    colM4.metric("Distinct Pillars", data["pillar"].nunique())
+
+    st.markdown("---")
+
+    # -----------------------------------------------
+    # BAR CHART - Completed vs Ongoing by Pillar
+    # -----------------------------------------------
+
+    by_pillar = (
+        data.groupby(["pillar", "is_completed"])
+        .size()
+        .reset_index(name="count")
+    )
+
+    by_pillar["Status"] = by_pillar["is_completed"].map(
+        {True: "Completed", False: "Ongoing"}
+    )
+
+    if not by_pillar.empty:
+        fig1 = px.bar(
+            by_pillar,
+            x="pillar",
+            y="count",
+            color="Status",
+            barmode="group",
+            title="Projects by Pillar — Completed vs Ongoing"
         )
+        st.plotly_chart(fig1, use_container_width=True)
 
-        data = fetch_df(filters).copy()
+    # -----------------------------------------------
+    # TOP N PROJECTS PER PILLAR (by priority)
+    # -----------------------------------------------
 
-        for col in ["start_date", "due_date"]:
-            data[col] = pd.to_datetime(data[col], errors="coerce")
+    st.markdown("### Top Projects per Pillar")
+    top_df = data.sort_values("priority").groupby("pillar").head(top_n)
 
-        st.divider()
-        st.subheader("Projects")
-        st.dataframe(
-            data.style.applymap(highlight_priority, subset=["priority"]),
-            use_container_width=True,
-        )
-    else:
-        st.info("Bootstrap DB first.")
+    st.dataframe(
+        top_df[["name", "pillar", "priority", "status", "progress"]],
+        use_container_width=True
+    )
 
+    st.markdown("---")
+
+    # -----------------------------------------------
+    # DETAILED PROJECT TABLE WITH PROGRESS BARS
+    # -----------------------------------------------
+
+    # HTML progress bar
+    def render_progress_bar(p):
+        color = progress_color(p)
+        return f"""
+        <div style="width:100%;background:#eee;border-radius:8px;">
+            <div style="width:{p}%;background:{color};
+                padding:6px;border-radius:8px;text-align:center;color:white;">
+                {p}%
+            </div>
+        </div>
+        """
+
+    data["Progress Bar"] = data["progress"].apply(render_progress_bar)
+
+    st.markdown("### All Projects")
+
+    st.write(
+        data[
+            [
+                "name", "pillar", "priority", "owner", "status",
+                "progress", "progress_status", "Progress Bar"
+            ]
+        ].to_html(escape=False),
+        unsafe_allow_html=True
+    )
 
 # ----------------------------------------------------------
-#                     ROADMAP TAB
+# TAB: ROADMAP
 # ----------------------------------------------------------
+
 with tab_roadmap:
-    st.header("Roadmap")
+    st.markdown("## Roadmap")
 
-    if ensure_table():
-        df = fetch_df().copy()
+    data = fetch_df({})
 
-        df["Start"] = pd.to_datetime(df["start_date"], errors="coerce")
-        df["Finish"] = pd.to_datetime(df["due_date"], errors="coerce")
+    gantt = data.copy()
+    gantt["Start"] = pd.to_datetime(gantt["start_date"], errors="coerce")
+    gantt["Finish"] = pd.to_datetime(gantt["due_date"], errors="coerce")
+    gantt = gantt.dropna(subset=["Start", "Finish"])
 
-        gantt = df.dropna(subset=["Start", "Finish"])
-
-        if not gantt.empty:
-            fig = px.timeline(
-                gantt,
-                x_start="Start",
-                x_end="Finish",
-                y="name",
-                color="pillar"
-            )
-            fig.update_yaxes(autorange="reversed")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No valid dated projects.")
-    else:
-        st.info("Bootstrap DB first.")
+    if not gantt.empty:
+        fig = px.timeline(
+            gantt,
+            x_start="Start",
+            x_end="Finish",
+            y="name",
+            color="pillar",
+            hover_data=["progress", "progress_status"]
+        )
+        fig.update_yaxes(autorange="reversed")
+        st.plotly_chart(fig, use_container_width=True)
