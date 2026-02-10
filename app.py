@@ -33,12 +33,15 @@ def column_exists(table_name: str, col_name: str) -> bool:
     with conn() as c:
         cur = c.cursor()
         cur.execute(f"PRAGMA table_info('{table_name}')")
-        cols = [row[1] for row in cur.fetchall()]  # row[1] = name
+        cols = [row[1] for row in cur.fetchall()]  # row[1] is the column name
         return col_name in cols
 
 
 def safe_migrate():
-    """Add missing columns safely, but only if the table exists."""
+    """
+    Add missing columns safely, but only if the DB file and table already exist.
+    This prevents ALTER TABLE errors on a cold start.
+    """
     if not os.path.exists(DB_PATH):
         return
     if not table_exists(TABLE):
@@ -61,11 +64,9 @@ def safe_migrate():
 
         # Ensure progress_status
         if not column_exists(TABLE, "progress_status"):
-            cur.execute(f"ALTER TABLE {TABLE} ADD COLUMN progress_status TEXT DEFAULT '';")
-
-# Run migrations only after file exists check further below to avoid unnecessary opens
-# (we also guard inside safe_migrate)
-# safe_migrate()  # will call this after we validate DB presence
+            cur.execute(
+                f"ALTER TABLE {TABLE} ADD COLUMN progress_status TEXT DEFAULT '';"
+            )
 
 
 def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
@@ -149,11 +150,12 @@ def progress_color(p):
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
 st.title("Digital Portfolio — Web Version")
 
+# Early checks
 if not os.path.exists(DB_PATH):
     st.error("Database not found.")
     st.stop()
 
-# Now that DB exists, attempt safe migrations
+# Perform safe migrations now that DB exists
 safe_migrate()
 
 if not table_exists(TABLE):
@@ -233,7 +235,6 @@ with tab_editor:
     # ---------- LEFT SIDE ----------
     with colA:
         name = st.text_input("Name*", project["name"])
-        # Provide a safe default list
         pillars_list = [""] + (distinct_values("pillar") or [])
         pillar = st.selectbox("Pillar*", pillars_list)
         priority = st.number_input("Priority", 1, 10, int(project["priority"] or 1))
@@ -310,7 +311,7 @@ with tab_editor:
                 )
                 st.success("Project updated.")
 
-        # Refresh to show latest progress_status in the disabled field and reflect changes
+        # Refresh to reflect new tag and values in the UI
         st.rerun()
 
     # ---------- DELETE ----------
@@ -428,7 +429,6 @@ with tab_dashboard:
 
     st.markdown("### Top Projects per Pillar")
 
-    # Ensure numeric sort where possible
     tmp = data.copy()
     tmp["priority_num"] = pd.to_numeric(tmp["priority"], errors="coerce")
     tmp = tmp.sort_values(["pillar", "priority_num", "priority"], na_position="last")
@@ -447,11 +447,12 @@ with tab_dashboard:
 
     def render_progress_bar(p):
         color = progress_color(p)
+        pct = int(p) if pd.notnull(p) else 0
         return f"""
         <div style="width:100%;background:#eee;border-radius:8px;">
-            <div style="width:{int(p)}%;background:{color};
+            <div style="width:{pct}%;background:{color};
                 padding:6px;border-radius:8px;text-align:center;color:white;">
-                {int(p)}%
+                {pct}%
             </div>
         </div>
         """
