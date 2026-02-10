@@ -38,7 +38,7 @@ def choose_or_type(
     if choice == manual_label:
         typed = st.text_input(f"{label} (manual entry)", value=(default_value or ""))
         return typed.strip(), True
-    else:
+ else:
         return choice.strip(), False
 ``
 # ------------------ Utilities ------------------
@@ -212,26 +212,25 @@ with st.form("project_form"):
 
     # ---- LEFT COLUMN ----
     project_name    = c1.text_input("Name*", value=name_val)
-    project_pillar  = c1.selectbox(
-        "Pillar*", [""] + pillar_list,
-        index=safe_index([""] + pillar_list, pillar_val)
+   project_pillar, pillar_used_manual = choose_or_type(
+        label="Pillar*",
+        existing_values=pillar_list,
+        default_value=pillar_val or "",
     )
+``
     project_priority = c1.number_input("Priority", min_value=1, max_value=99, value=priority_val)
 
     # ---- RIGHT COLUMN ----
-    project_owner  = c2.selectbox(
-        "Owner", [""] + owner_list,
-        index=safe_index([""] + owner_list, owner_val)
+    project_owner, owner_used_manual = choose_or_type(
+        label="Owner",
+        existing_values=owner_list,
+        default_value=owner_val or "",
     )
+
     project_status = c2.selectbox(
         "Status", [""] + status_list,
         index=safe_index([""] + status_list, status_val)
     )
-    start_date = c2.date_input("Start Date", value=start_val)
-    due_date   = c2.date_input("Due Date", value=due_val)
-
-    description = st.text_area("Description", value=desc_val, height=120)
-
     # ---- FORM SUBMIT BUTTONS ----
     col_a, col_b, col_c = st.columns(3)
     submitted_new    = col_a.form_submit_button("Save New")
@@ -240,9 +239,17 @@ with st.form("project_form"):
 
     # ------------- CRUD ACTIONS (on submit) -------------
     # CREATE
-    if submitted_new:
-        if not project_name or not project_pillar:
-            st.error("Name and Pillar are required.")
+         if submitted_new:
+        errors = []
+        if not project_name:
+            errors.append("Name is required.")
+        if not project_pillar:
+            errors.append("Pillar is required.")
+        if not project_owner:
+            errors.append("Owner is required.")
+
+        if errors:
+            st.error(" ".join(errors))
         else:
             with conn() as c:
                 c.execute(
@@ -263,39 +270,59 @@ with st.form("project_form"):
                     ),
                 )
                 c.commit()
+            # Make sure new Owner appears in dropdowns immediately
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
             st.success("Project created!")
             st.session_state.project_selector = NEW_LABEL
             st.rerun()
+``
 
     # UPDATE
     if submitted_update:
         if not loaded_project:
             st.warning("Select an existing project to update.")
-        elif not project_name or not project_pillar:
-            st.error("Name and Pillar are required.")
         else:
-            with conn() as c:
-                c.execute(
-                    f"""
-                    UPDATE {TABLE}
-                    SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?
-                    WHERE id=?
-                    """,
-                    (
-                        project_name.strip(),
-                        project_pillar.strip(),
-                        int(project_priority),
-                        description.strip(),
-                        project_owner.strip(),
-                        project_status.strip(),
-                        to_iso(start_date),
-                        to_iso(due_date),
-                        int(loaded_project["id"]),
-                    ),
-                )
-                c.commit()
-            st.success("Project updated!")
-            st.rerun()
+            errors = []
+            if not project_name:
+                errors.append("Name is required.")
+            if not project_pillar:
+                errors.append("Pillar is required.")
+            if not project_owner:
+                errors.append("Owner is required.")
+
+            if errors:
+                st.error(" ".join(errors))
+            else:
+                with conn() as c:
+                    c.execute(
+                        f"""
+                        UPDATE {TABLE}
+                        SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?
+                        WHERE id=?
+                        """,
+                        (
+                            project_name.strip(),
+                            project_pillar.strip(),
+                            int(project_priority),
+                            description.strip(),
+                            project_owner.strip(),
+                            project_status.strip(),
+                            to_iso(start_date),
+                            to_iso(due_date),
+                            int(loaded_project["id"]),
+                        ),
+                    )
+                    c.commit()
+                try:
+                    st.cache_data.clear()
+                except Exception:
+                    pass
+                st.success("Project updated!")
+                st.rerun()
+
 
     # DELETE
     if submitted_delete:
@@ -305,6 +332,10 @@ with st.form("project_form"):
             with conn() as c:
                 c.execute(f"DELETE FROM {TABLE} WHERE id=?", (int(loaded_project["id"]),))
                 c.commit()
+          try:
+                st.cache_data.clear()
+            except Exception:
+                pass
             st.warning("Project deleted.")
             st.session_state.project_selector = NEW_LABEL
             st.rerun()
