@@ -383,3 +383,236 @@ st.markdown("---")
 st.subheader("Projects")
 
 st.dataframe(data, use_container_width=True)
+# ---------- REPORTS ----------
+st.markdown("---")
+st.subheader("Reports")
+
+# Add derived year fields
+data["start_year"] = pd.to_datetime(data["start_date"], errors="coerce").dt.year
+data["due_year"] = pd.to_datetime(data["due_date"], errors="coerce").dt.year
+
+# Report Controls
+rc1, rc2, rc3, rc4 = st.columns([1, 1, 1, 2])
+year_mode = rc1.radio("Year Type", ["Start Year", "Due Year"])
+year_col = "start_year" if year_mode == "Start Year" else "due_year"
+
+years = ["All"] + sorted(data[year_col].dropna().astype(int).unique().tolist())
+year_f = rc2.selectbox("Year", years)
+top_n = rc3.slider("Top N per Pillar", min_value=1, max_value=10, value=5)
+show_all = rc4.checkbox("Show ALL Reports", value=True)
+
+if not show_all:
+    show_kpi = rc4.checkbox("KPI Cards", True)
+    show_pillar_chart = rc4.checkbox("Pillar Status Chart", True)
+    show_roadmap = rc4.checkbox("Roadmap", True)
+    show_table = rc4.checkbox("Projects Table", True)
+else:
+    show_kpi = show_pillar_chart = show_roadmap = show_table = True
+
+# Filter by year if selected
+if year_f != "All":
+    data = data[data[year_col] == int(year_f)]
+
+# ---------- KPI ----------
+if show_kpi:
+    st.markdown("---")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Projects", len(data))
+    k2.metric("Completed", (data["status"].str.lower() == "done").sum())
+    k3.metric("Ongoing", (data["status"].str.lower() != "done").sum())
+    k4.metric("Distinct Pillars", data["pillar"].nunique())
+
+# ---------- Pillar Status Chart ----------
+if show_pillar_chart:
+    st.markdown("---")
+    st.subheader("Pillar Status")
+    status_df = data.copy()
+    status_df["state"] = status_df["status"].apply(
+        lambda x: "Completed" if str(x).lower() == "done" else "Ongoing"
+    )
+    pillar_summary = (
+        status_df.groupby(["pillar", "state"]).size().reset_index(name="count")
+    )
+    if not pillar_summary.empty:
+        fig = px.bar(
+            pillar_summary,
+            x="pillar",
+            y="count",
+            color="state",
+            barmode="group",
+            title="Projects by Pillar — Completed vs Ongoing",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No pillar summary available.")
+
+# ---------- Top N per Pillar ----------
+st.markdown("---")
+st.subheader(f"Top {top_n} Projects per Pillar")
+top_df = (
+    data.sort_values("priority", na_position="last")
+    .groupby("pillar", as_index=False, sort=False)
+    .head(top_n)
+)
+st.dataframe(top_df, use_container_width=True)
+
+# ---------- ROADMAP ----------
+if show_roadmap:
+    st.markdown("---")
+    st.subheader("Roadmap")
+
+    gantt = data.copy()
+    gantt["Start"] = pd.to_datetime(gantt["start_date"], errors="coerce")
+    gantt["Finish"] = pd.to_datetime(gantt["due_date"], errors="coerce")
+
+    # Keep projects with at least one valid date
+    gantt = gantt[~(gantt["Start"].isna() & gantt["Finish"].isna())]
+
+    if not gantt.empty:
+        fig = px.timeline(
+            gantt,
+            x_start="Start",
+            x_end="Finish",
+            y="name",
+            color="pillar",
+            title="Project Roadmap",
+        )
+        fig.update_yaxes(autorange="reversed")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No projects with valid dates to display on the roadmap.")
+
+# ---------- PROJECTS TABLE ----------
+if show_table:
+    st.markdown("---")
+    st.subheader("Projects Table")
+    st.dataframe(data, use_container_width=True)
+
+# ---------- REPORTS ----------
+st.markdown("---")
+st.subheader("Reports")
+
+# Add derived year fields
+data["start_year"] = pd.to_datetime(data["start_date"], errors="coerce").dt.year
+data["due_year"] = pd.to_datetime(data["due_date"], errors="coerce").dt.year
+
+# Report Controls
+rc1, rc2, rc3, rc4 = st.columns([1, 1, 1, 2])
+year_mode = rc1.radio("Year Type", ["Start Year", "Due Year"])
+year_col = "start_year" if year_mode == "Start Year" else "due_year"
+
+years = ["All"] + sorted(data[year_col].dropna().astype(int).unique().tolist())
+year_f = rc2.selectbox("Year", years)
+top_n = rc3.slider("Top N per Pillar", min_value=1, max_value=10, value=5)
+show_all = rc4.checkbox("Show ALL Reports", value=True)
+
+if not show_all:
+    show_kpi = rc4.checkbox("KPI Cards", True)
+    show_pillar_chart = rc4.checkbox("Pillar Status Chart", True)
+    show_roadmap = rc4.checkbox("Roadmap", True)
+    show_table = rc4.checkbox("Projects Table", True)
+else:
+    show_kpi = show_pillar_chart = show_roadmap = show_table = True
+
+# Filter by year if selected
+if year_f != "All":
+    data = data[data[year_col] == int(year_f)]
+
+# ---------- KPI ----------
+if show_kpi:
+    st.markdown("---")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Projects", len(data))
+    k2.metric("Completed", (data["status"].str.lower() == "done").sum())
+    k3.metric("Ongoing", (data["status"].str.lower() != "done").sum())
+    k4.metric("Distinct Pillars", data["pillar"].nunique())
+
+# ---------- Pillar Status Chart ----------
+if show_pillar_chart:
+    st.markdown("---")
+    st.subheader("Pillar Status")
+    status_df = data.copy()
+    status_df["state"] = status_df["status"].apply(
+        lambda x: "Completed" if str(x).lower() == "done" else "Ongoing"
+    )
+    pillar_summary = (
+        status_df.groupby(["pillar", "state"]).size().reset_index(name="count")
+    )
+    if not pillar_summary.empty:
+        fig = px.bar(
+            pillar_summary,
+            x="pillar",
+            y="count",
+            color="state",
+            barmode="group",
+            title="Projects by Pillar — Completed vs Ongoing",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No pillar summary available.")
+
+# ---------- Top N per Pillar ----------
+st.markdown("---")
+st.subheader(f"Top {top_n} Projects per Pillar")
+top_df = (
+    data.sort_values("priority", na_position="last")
+    .groupby("pillar", as_index=False, sort=False)
+    .head(top_n)
+)
+st.dataframe(top_df, use_container_width=True)
+
+# ---------- ROADMAP ----------
+if show_roadmap:
+    st.markdown("---")
+    st.subheader("Roadmap")
+
+    gantt = data.copy()
+    gantt["Start"] = pd.to_datetime(gantt["start_date"], errors="coerce")
+    gantt["Finish"] = pd.to_datetime(gantt["due_date"], errors="coerce")
+
+    # Keep projects with at least one valid date
+    gantt = gantt[~(gantt["Start"].isna() & gantt["Finish"].isna())]
+
+    if not gantt.empty:
+        fig = px.timeline(
+            gantt,
+            x_start="Start",
+            x_end="Finish",
+            y="name",
+            color="pillar",
+            title="Project Roadmap",
+        )
+        fig.update_yaxes(autorange="reversed")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No projects with valid dates to display on the roadmap.")
+
+# ---------- PROJECTS TABLE ----------
+if show_table:
+    st.markdown("---")
+    st.subheader("Projects Table")
+    st.dataframe(data, use_container_width=True)
+
+# ---------- CSV EXPORT ----------
+st.markdown("---")
+st.subheader("Export Data")
+
+exp1, exp2 = st.columns([1, 1])
+csv_filtered = data.to_csv(index=False).encode("utf-8")
+exp1.download_button(
+    label="Export Filtered CSV",
+    data=csv_filtered,
+    file_name=f"projects_filtered_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+    mime="text/csv",
+)
+
+with conn() as c:
+    df_all = pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY name", c)
+
+csv_all = df_all.to_csv(index=False).encode("utf-8")
+exp2.download_button(
+    label="Export ALL CSV",
+    data=csv_all,
+    file_name=f"projects_all_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+    mime="text/csv",
+)
