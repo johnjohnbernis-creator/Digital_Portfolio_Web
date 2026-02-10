@@ -70,11 +70,16 @@ def distinct_values(col: str) -> Listwith conn() as c:
 
 # ---------- Priority Color Helpers ----------
 def priority_color(p):
-    try: p = int(p)
-    except: return "grey"
-    if p == 1: return "red"
-    if p in (2, 3): return "orange"
-    if p in (4, 5, 6): return "gold"
+    try:
+        p = int(p)
+    except:
+        return "grey"
+    if p == 1:
+        return "red"
+    if p in (2, 3):
+        return "orange"
+    if p in (4, 5, 6):
+        return "gold"
     return "green"
 
 
@@ -143,9 +148,12 @@ with tab_editor:
             df = pd.read_sql_query("SELECT * FROM projects WHERE id=?", c, params=[pid])
         project = df.iloc[0].to_dict()
 
+    # Date parsing
     def parse_date(d):
-        try: return datetime.strptime(str(d), "%Y-%m-%d").date()
-        except: return date.today()
+        try:
+            return datetime.strptime(str(d), "%Y-%m-%d").date()
+        except:
+            return date.today()
 
     start_val = parse_date(project.get("start_date"))
     due_val = parse_date(project.get("due_date"))
@@ -174,18 +182,24 @@ with tab_editor:
     start_str = start_date.strftime("%Y-%m-%d")
     due_str = due_date.strftime("%Y-%m-%d")
 
+    # Clean empty strings → None
+    pillar_clean = pillar if pillar.strip() else None
+    status_clean = status if status.strip() else None
+    owner_clean = owner if owner.strip() else None
+
     c1, c2, c3 = st.columns(3)
 
+    # ---- SAVE ----
     if c1.button("New / Save"):
         with conn() as c:
             if selected == "New Project":
                 c.execute(
                     """
                     INSERT INTO projects
-                    (id, name, pillar, priority, description, owner, status, start_date, due_date)
-                    VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (name, pillar, priority, description, owner, status, start_date, due_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (name, pillar, priority, description, owner, status, start_str, due_str),
+                    (name, pillar_clean, priority, description, owner_clean, status_clean, start_str, due_str),
                 )
                 st.success("Project added.")
             else:
@@ -195,15 +209,18 @@ with tab_editor:
                     SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?
                     WHERE id=?
                     """,
-                    (name, pillar, priority, description, owner, status, start_str, due_str, project["id"]),
+                    (name, pillar_clean, priority, description, owner_clean, status_clean,
+                     start_str, due_str, project["id"]),
                 )
                 st.success("Project updated.")
 
+    # ---- DELETE ----
     if c2.button("Delete") and selected != "New Project":
         with conn() as c:
             c.execute("DELETE FROM projects WHERE id=?", (project["id"],))
         st.warning("Project deleted.")
 
+    # ---- CLEAR ----
     if c3.button("Clear"):
         st.experimental_rerun()
 
