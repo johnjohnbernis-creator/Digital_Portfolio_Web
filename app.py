@@ -13,15 +13,15 @@ import streamlit as st
 DB_PATH = "portfolio.db"
 TABLE = "projects"
 
-# Default lists used to seed the dropdowns (merged with values found in DB)
-PILLAR_CHOICES_DEFAULT = [
+# Canonical Pillar list — enforced in the form and validation
+PILLAR_CHOICES_DEFAULT: List[str] = [
     "Digital Mindset",
     "Automation",
     "Data & Analytics",
     "Enablement",
     "Infrastructure",
 ]
-STATUS_CHOICES = ["Idea", "In Progress", "Blocked", "Done"]
+STATUS_CHOICES: List[str] = ["Idea", "In Progress", "Blocked", "Done"]
 
 
 # ---------- Utilities ----------
@@ -129,9 +129,8 @@ def distinct_values(col: str) -> List[str]:
 
 
 def pillar_choices() -> List[str]:
-    """Defaults first, then any new pillars from the DB."""
-    db_vals = [v for v in distinct_values("pillar") if v not in PILLAR_CHOICES_DEFAULT]
-    return PILLAR_CHOICES_DEFAULT + db_vals
+    """Return the fixed, canonical Pillar list (no merging with DB)."""
+    return PILLAR_CHOICES_DEFAULT.copy()
 
 
 def upsert_project(payload: Dict[str, Any], project_id: Optional[int]) -> int:
@@ -198,6 +197,10 @@ def validate_payload(
     if not name or not pillar:
         raise ValueError("Name and Pillar are required.")
 
+    # Pillar must be one of the fixed choices
+    if pillar not in PILLAR_CHOICES_DEFAULT:
+        raise ValueError("Pillar must be selected from the fixed list.")
+
     # Priority to int (allow blank → None)
     prio = None
     if priority_val not in (None, "", "None"):
@@ -236,6 +239,7 @@ init_db()
 # ---- Global Filters ----
 colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
 
+# Filters remain dynamic (based on DB contents); this doesn't affect the enforced form list
 pillars_filter = ["All"] + (distinct_values("pillar") or [])
 statuses_filter = ["All"] + (distinct_values("status") or [])
 owners_filter = ["All"] + (distinct_values("owner") or [])
@@ -263,7 +267,7 @@ data = fetch_df(filters)
 data["start_year"] = pd.to_datetime(data["start_date"], errors="coerce").dt.year
 data["due_year"] = pd.to_datetime(data["due_date"], errors="coerce").dt.year
 
-# ---- CRUD Form (matches screenshot: dropdowns + spinner + button row) ----
+# ---- CRUD Form (fixed Pillar list) ----
 st.markdown("---")
 st.subheader("Project")
 
@@ -292,9 +296,7 @@ with form_left:
         return default if (v is None or (isinstance(v, float) and pd.isna(v))) else v
 
     default_name = _get(sel_row["name"], "")
-    default_pillar = _get(
-        sel_row["pillar"], PILLAR_CHOICES_DEFAULT[0] if PILLAR_CHOICES_DEFAULT else ""
-    )
+    default_pillar = _get(sel_row["pillar"], PILLAR_CHOICES_DEFAULT[0])
     default_priority = _get(sel_row["priority"], 3)
     default_desc = _get(sel_row["description"], "")
     default_owner = _get(sel_row["owner"], "")
@@ -302,8 +304,8 @@ with form_left:
     default_start = _get(sel_row["start_date"], "")
     default_due = _get(sel_row["due_date"], "")
 
-    # Build dropdown options for Pillar & Status
-    pillar_opts = pillar_choices()
+    # Fixed options for Pillar & Status
+    pillar_opts = pillar_choices()  # fixed list
     pillar_index = pillar_opts.index(default_pillar) if default_pillar in pillar_opts else 0
     status_index = STATUS_CHOICES.index(default_status) if default_status in STATUS_CHOICES else 0
 
@@ -332,7 +334,7 @@ with form_left:
         start_i = colF.text_input("Start (YYYY-MM-DD)", value=str(default_start))
         due_i = colG.text_input("Due (YYYY-MM-DD)", value=str(default_due))
 
-        # ---- Button row (as in screenshot) ----
+        # ---- Button row ----
         bcols = st.columns([1, 1, 1, 1, 1.2, 1.2])
         new_save = bcols[0].form_submit_button("New / Save")
         update_btn = bcols[1].form_submit_button("Update")
@@ -486,7 +488,7 @@ top_df = (
 
 st.dataframe(top_df, use_container_width=True)
 
-# ---- Roadmap (UNCHANGED LOGIC) ----
+# ---- Roadmap ----
 if show_roadmap:
     st.markdown("---")
     st.subheader("Roadmap")
