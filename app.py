@@ -233,113 +233,164 @@ for k, v in DEFAULTS.items():
 
 # ---------- Project Editor ----------
 st.markdown("---")
+# ---------- Project Editor (NONCE-based keys; safe for New/Save/Update/Clear) ----------
+st.markdown("---")
 st.subheader("Project")
 
+from datetime import date
+
+# --- helpers ---
+def iso_or_none(d: Optional[date], keep_none_flag: bool) -> Optional[str]:
+    if keep_none_flag:
+        return None
+    if not d:
+        return None
+    return d.strftime("%Y-%m-%d")
+
+def parse_date_from_db(s: Optional[str]) -> Optional[date]:
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date() if s else None
+    except Exception:
+        return None
+
+# --- persistent state ---
+st.session_state.setdefault("current_project_id", None)
+st.session_state.setdefault("form_nonce", 0)       # drives all widget keys
+st.session_state.setdefault("_loaded_id", None)    # which row is currently loaded into form
+
+def bump_nonce_and_rerun():
+    st.session_state["form_nonce"] += 1
+    try:
+        st.rerun()
+    except Exception:
+        st.experimental_rerun()
+
+# Build options (before form)
 pillar_values = distinct_values("pillar")
 status_defaults = ["Idea", "Planned", "In Progress", "Blocked", "Done"]
 status_values = status_defaults + [s for s in distinct_values("status") if s not in status_defaults]
 
-# Selector for existing projects
+# Load list for selector
 with conn() as c:
-    df_names = pd.read_sql_query(
-        f"SELECT id, name FROM {TABLE} ORDER BY name COLLATE NOCASE", c
-    )
+    df_names = pd.read_sql_query(f"SELECT id, name FROM {TABLE} ORDER BY name COLLATE NOCASE", c)
+
 project_options = ["<New Project>"] + [f"{int(r['id'])} — {r['name']}" for _, r in df_names.iterrows()]
 sel = st.selectbox("Load existing", project_options, index=0)
 
+# Handle selection (no widget mutation; just set current id and bump keys)
 if sel == "<New Project>":
     if st.session_state["current_project_id"] is not None:
-        # Switching from a loaded record to New => queue reset
-        queue_action("new")
+        st.session_state["current_project_id"] = None
+        st.session_state["_loaded_id"] = None
+        bump_nonce_and_rerun()
 else:
     try:
         selected_id = int(sel.split(" — ")[0])
         if selected_id != st.session_state.get("current_project_id"):
-            queue_action("load", {"id": selected_id})
+            st.session_state["current_project_id"] = selected_id
+            st.session_state["_loaded_id"] = None
+            bump_nonce_and_rerun()
     except Exception:
         pass
 
-# If we have a record selected and it's not yet populated into fields, populate now
-loaded = None
-if st.session_state.get("current_project_id"):
-    loaded = fetch_one_by_id(st.session_state["current_project_id"])
+# Fetch currently loaded record (if any)
+loaded = fetch_one_by_id(st.session_state["current_project_id"]) if st.session_state.get("current_project_id") else None
 
+# Initial values for widgets
 if loaded and st.session_state["_loaded_id"] != loaded.get("id"):
+    # Ensure options contain values from the record
     if loaded.get("pillar") and loaded["pillar"] not in pillar_values:
         pillar_values = [loaded["pillar"]] + pillar_values
     if loaded.get("status") and loaded["status"] not in status_values:
         status_values = [loaded["status"]] + status_values
 
-    st.session_state[K_NAME] = str(loaded.get("name") or "")
-    st.session_state[K_PILLAR] = str(loaded.get("pillar") or "")
-    st.session_state[K_PRIORITY] = _safe_int(loaded.get("priority"), 3)
-    st.session_state[K_OWNER] = str(loaded.get("owner") or "")
-    st.session_state[K_STATUS] = str(loaded.get("status") or "Idea")
-
-    start_parsed = try_date(loaded.get("start_date"))
-    due_parsed = try_date(loaded.get("due_date"))
-    st.session_state[K_START] = start_parsed or date.today()
-    st.session_state[K_DUE] = due_parsed or date.today()
-    st.session_state[K_NO_START] = start_parsed is None
-    st.session_state[K_NO_DUE] = due_parsed is None
-
-    st.session_state[K_DESC] = str(loaded.get("description") or "")
+    init = {
+        "name":        str(loaded.get("name") or ""),
+        "pillar":      str(loaded.get("pillar") or ""),
+        "priority":    int(loaded.get("priority") or 3),
+        "owner":       str(loaded.get("owner") or ""),
+        "status":      str(loaded.get("status") or "Idea"),
+        "start_date":  parse_date_from_db(loaded.get("start_date")) or date.today(),
+        "no_start":    loaded.get("start_date") in (None, "", "None"),
+        "due_date":    parse_date_from_db(loaded.get("due_date")) or date.today(),
+        "no_due":      loaded.get("due_date") in (None, "", "None"),
+        "description": str(loaded.get("description") or ""),
+    }
     st.session_state["_loaded_id"] = loaded.get("id")
+else:
+    # default blank/new
+    init = {
+        "name":        "",
+        "pillar":      "",
+        "priority":    3,
+        "owner":       "",
+        "status":      "Idea",
+        "start_date":  date.today(),
+        "no_start":    True,
+        "due_date":    date.today(),
+        "no_due":      True,
+        "description": "",
+    }
 
-# ---- Form (read clicks only; DO NOT mutate state here) ----
-with st.form("project_form", clear_on_submit=False):
+# All widget keys depend on nonce => brand‑new widgets after every action
+N = st.session_state["form_nonce"]
+def k(s: str) -> str:
+    return f"{s}_{N}"
+
+with st.form(f"project_form_{N}", clear_on_submit=False):
     lc1, lc2 = st.columns(2)
 
-    lc1.text_input("Name*", key=K_NAME)
-    lc1.selectbox("Pillar*", options=[""] + pillar_values, key=K_PILLAR)
-    lc1.number_input("Priority", min_value=1, max_value=99, step=1, key=K_PRIORITY)
+    name = lc1.text_input("Name*", value=init["name"], key=k("name"))
+    pillar = lc1.selectbox("Pillar*", options=[""] + pillar_values, index=([""] + pillar_values).index(init["pillar"]) if init["pillar"] in pillar_values else 0, key=k("pillar"))
+    priority = lc1.number_input("Priority", min_value=1, max_value=99, step=1, value=int(init["priority"]), key=k("priority"))
 
-    lc2.text_input("Owner", key=K_OWNER)
-    lc2.selectbox("Status", options=status_values, key=K_STATUS)
+    owner = lc2.text_input("Owner", value=init["owner"], key=k("owner"))
+    status = lc2.selectbox("Status", options=status_values, index=(status_values.index(init["status"]) if init["status"] in status_values else 0), key=k("status"))
 
-    lc2.checkbox("No Start Date", key=K_NO_START)
-    lc2.date_input("Start", value=st.session_state[K_START], format="YYYY-MM-DD", key=K_START)
+    no_start = lc2.checkbox("No Start Date", value=bool(init["no_start"]), key=k("no_start"))
+    start_dt = lc2.date_input("Start", value=init["start_date"], format="YYYY-MM-DD", key=k("start"))
 
-    lc2.checkbox("No Due Date", key=K_NO_DUE)
-    lc2.date_input("Due", value=st.session_state[K_DUE], format="YYYY-MM-DD", key=K_DUE)
+    no_due = lc2.checkbox("No Due Date", value=bool(init["no_due"]), key=k("no_due"))
+    due_dt = lc2.date_input("Due", value=init["due_date"], format="YYYY-MM-DD", key=k("due"))
 
-    st.text_area("Description", height=120, key=K_DESC)
+    description = st.text_area("Description", value=init["description"], height=120, key=k("desc"))
 
-    st.write("")  # spacer
-    bcol1, bcol2, bcol3, bcol4, bcol5 = st.columns([1, 1, 1, 1, 2])
-    new_clicked     = bcol1.form_submit_button("New")
-    save_clicked    = bcol2.form_submit_button("Save (Insert)")
-    update_clicked  = bcol3.form_submit_button("Update")
-    delete_clicked  = bcol4.form_submit_button("Delete")
-    clear_clicked   = bcol5.form_submit_button("Clear")
+    st.write("")
+    b1, b2, b3, b4, b5 = st.columns([1, 1, 1, 1, 2])
+    new_clicked    = b1.form_submit_button("New")
+    save_clicked   = b2.form_submit_button("Save (Insert)")
+    update_clicked = b3.form_submit_button("Update")
+   rm_submit_button("Delete")
+    clear_clicked  = b5.form_submit_button("Clear")
 
-# Build record to persist (outside the form)
-start_out: Optional[str] = None if st.session_state[K_NO_START] else to_iso(try_date(st.session_state[K_START]))
-due_out: Optional[str] = None if st.session_state[K_NO_DUE] else to_iso(try_date(st.session_state[K_DUE]))
+# Build record from current widget state (read from session_state using the dynamic keys)
 rec = dict(
-    name=(st.session_state[K_NAME] or "").strip(),
-    pillar=(st.session_state[K_PILLAR] or "").strip(),
-    priority=_safe_int(st.session_state[K_PRIORITY], None),
-    description=(st.session_state[K_DESC] or "").strip(),
-    owner=(st.session_state[K_OWNER] or "").strip(),
-    status=(st.session_state[K_STATUS] or "").strip(),
-    start_date=start_out,
-    due_date=due_out,
+    name        = st.session_state.get(k("name"), "").strip(),
+    pillar      = st.session_state.get(k("pillar"), "").strip(),
+    priority    = _safe_int(st.session_state.get(k("priority"), 3), None),
+    owner       = st.session_state.get(k("owner"), "").strip(),
+    status      = st.session_state.get(k("status"), "").strip(),
+    start_date  = iso_or_none(st.session_state.get(k("start")), st.session_state.get(k("no_start"), False)),
+    due_date    = iso_or_none(st.session_state.get(k("due")),   st.session_state.get(k("no_due"), False)),
+    description = st.session_state.get(k("desc"), "").strip(),
 )
 
-def missing_required(r: Dict[str, Any]) -> Optional[str]:
-    if not r["name"]:
+def missing_required(r: Dict[str, Any]) -> Optionalif not r["name"]:
         return "Name is required."
     if not r["pillar"]:
         return "Pillar is required."
     return None
 
-# ---- Button handlers (queue action, then rerun) ----
+# ---- Button handlers (NO widget key mutation — only DB + id + bump keys) ----
 if new_clicked:
-    queue_action("new")
+    st.session_state["current_project_id"] = None
+    st.session_state["_loaded_id"] = None
+    bump_nonce_and_rerun()
 
 if clear_clicked:
-    queue_action("clear")
+    st.session_state["current_project_id"] = None
+    st.session_state["_loaded_id"] = None
+    bump_nonce_and_rerun()
 
 if save_clicked:
     err = missing_required(rec)
@@ -349,7 +400,9 @@ if save_clicked:
         try:
             new_id = insert_project(rec)
             st.success(f"Project inserted with id {new_id}.")
-            queue_action("load", {"id": new_id})
+            st.session_state["current_project_id"] = new_id
+            st.session_state["_loaded_id"] = None   # force load from DB next run
+            bump_nonce_and_rerun()
         except sqlite3.IntegrityError as e:
             st.error("Insert failed due to a database integrity constraint.")
             st.exception(e)
@@ -368,7 +421,8 @@ if update_clicked:
             try:
                 update_project(st.session_state["current_project_id"], rec)
                 st.success(f"Project {st.session_state['current_project_id']} updated.")
-                queue_action("load", {"id": st.session_state["current_project_id"]})
+                st.session_state["_loaded_id"] = None
+                bump_nonce_and_rerun()
             except sqlite3.IntegrityError as e:
                 st.error("Update failed due to a database integrity constraint.")
                 st.exception(e)
@@ -383,141 +437,9 @@ if delete_clicked:
         try:
             delete_project(st.session_state["current_project_id"])
             st.success("Project deleted.")
-            queue_action("new")
+            st.session_state["current_project_id"] = None
+            st.session_state["_loaded_id"] = None
+            bump_nonce_and_rerun()
         except Exception as e:
             st.error("Unexpected error while deleting the project.")
             st.exception(e)
-
-# ---------- Filters ----------
-st.markdown("---")
-st.subheader("Filters")
-
-colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
-
-pillars = ["All"] + distinct_values("pillar")
-statuses = ["All"] + distinct_values("status")
-owners = ["All"] + distinct_values("owner")
-
-priority_vals = distinct_values("priority")
-priority_opts = ["All"] + sorted(set(priority_vals)) if priority_vals else ["All"]
-
-pillar_f = colF1.selectbox("Pillar", pillars)
-status_f = colF2.selectbox("Status", statuses)
-owner_f = colF3.selectbox("Owner", owners)
-priority_f = colF4.selectbox("Priority", priority_opts)
-search_f = colF6.text_input("Search")
-
-filters = dict(
-    pillar=pillar_f,
-    status=status_f,
-    owner=owner_f,
-    priority=priority_f,
-    search=search_f,
-)
-data = fetch_df(filters)
-
-# ---------- Reports ----------
-# Derived Years
-data["start_year"] = pd.to_datetime(data["start_date"], errors="coerce").dt.year
-data["due_year"] = pd.to_datetime(data["due_date"], errors="coerce").dt.year
-
-st.markdown("---")
-st.subheader("Report Controls")
-
-rc1, rc2, rc3, rc4 = st.columns([1, 1, 1, 2])
-year_mode = rc1.radio("Year Type", ["Start Year", "Due Year"])
-year_col = "start_year" if year_mode == "Start Year" else "due_year"
-years = ["All"] + sorted(data[year_col].dropna().astype(int).unique().tolist())
-year_f = rc2.selectbox("Year", years)
-top_n = rc3.slider("Top N per Pillar", min_value=1, max_value=10, value=5)
-show_all = rc4.checkbox("Show ALL Reports", value=True)
-
-if not show_all:
-    show_kpi = rc4.checkbox("KPI Cards", True)
-    show_pillar_chart = rc4.checkbox("Pillar Status Chart", True)
-    show_roadmap = rc4.checkbox("Roadmap", True)
-    show_table = rc4.checkbox("Projects Table", True)
-else:
-    show_kpi = show_pillar_chart = show_roadmap = show_table = True
-
-if year_f != "All":
-    data = data[data[year_col] == int(year_f)]
-
-# KPI
-if show_kpi:
-    st.markdown("---")
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Projects", len(data))
-    k2.metric("Completed", (data["status"].str.lower() == "done").sum())
-    k3.metric("Ongoing", (data["status"].str.lower() != "done").sum())
-    k4.metric("Distinct Pillars", data["pillar"].nunique())
-
-# Pillar Status
-if show_pillar_chart:
-    st.markdown("---")
-    status_df = data.copy()
-    status_df["state"] = status_df["status"].apply(
-        lambda x: "Completed" if str(x).lower() == "done" else "Ongoing"
-    )
-    pillar_summary = (
-        status_df.groupby(["pillar", "state"]).size().reset_index(name="count")
-    )
-    if not pillar_summary.empty:
-        fig = px.bar(
-            pillar_summary,
-            x="pillar",
-            y="count",
-            color="state",
-            barmode="group",
-            title="Projects by Pillar — Completed vs Ongoing",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-# Top N per Pillar
-st.markdown("---")
-st.subheader(f"Top {top_n} Projects per Pillar")
-top_df = (
-    data.sort_values("priority", na_position="last")
-    .groupby("pillar", as_index=False, sort=False)
-    .head(top_n)
-)
-st.dataframe(top_df, use_container_width=True)
-
-# Roadmap
-if show_roadmap:
-    st.markdown("---")
-    st.subheader("Roadmap")
-    gantt = data.copy()
-    gantt["Start"] = pd.to_datetime(gantt["start_date"], errors="coerce")
-    gantt["Finish"] = pd.to_datetime(gantt["due_date"], errors="coerce")
-    gantt = gantt.dropna(subset=["Start", "Finish"])
-    if not gantt.empty:
-        fig = px.timeline(gantt, x_start="Start", x_end="Finish", y="name", color="pillar")
-        fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig, use_container_width=True)
-
-# Projects Table
-st.markdown("---")
-st.subheader("Projects")
-st.dataframe(data, use_container_width=True)
-
-# CSV Export
-st.markdown("---")
-st.subheader("Export")
-exp1, exp2 = st.columns([1, 1])
-csv_filtered = data.to_csv(index=False).encode("utf-8")
-exp1.download_button(
-    label="Export Filtered CSV",
-    data=csv_filtered,
-    file_name=f"projects_filtered_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-    mime="text/csv",
-)
-with conn() as c:
-    df_all = pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY name COLLATE NOCASE", c)
-csv_all = df_all.to_csv(index=False).encode("utf-8")
-exp2.download_button(
-    label="Export ALL CSV",
-    data=csv_all,
-    file_name=f"projects_all_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-    mime="text/csv",
-)
