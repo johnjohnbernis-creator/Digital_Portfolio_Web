@@ -25,21 +25,14 @@ def safe_migrate():
         cur = c.cursor()
 
         # Add progress column
-        cur.execute(
-            "SELECT name FROM pragma_table_info('projects') WHERE name='progress';"
-        )
+        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='progress';")
         if not cur.fetchone():
             cur.execute("ALTER TABLE projects ADD COLUMN progress INTEGER DEFAULT 0;")
 
         # Add progress_status column
-        cur.execute(
-            "SELECT name FROM pragma_table_info('projects') WHERE name='progress_status';"
-        )
+        cur.execute("SELECT name FROM pragma_table_info('projects') WHERE name='progress_status';")
         if not cur.fetchone():
-            cur.execute(
-                "ALTER TABLE projects ADD COLUMN progress_status TEXT DEFAULT '';"
-            )
-
+            cur.execute("ALTER TABLE projects ADD COLUMN progress_status TEXT DEFAULT '';")
 
 safe_migrate()
 
@@ -100,11 +93,6 @@ def priority_color(p):
     return "green"
 
 
-def highlight_priority(val):
-    return f"color: {priority_color(val)}; font-weight:bold;"
-
-
-# ---------- Progress Color ----------
 def progress_color(p):
     try:
         p = int(p)
@@ -168,7 +156,6 @@ with tab_editor:
         )
 
     else:
-        # ---------- SAFE PROJECT LOADING ----------
         pid_row = existing[existing["name"] == selected]
 
         if pid_row.empty:
@@ -198,14 +185,12 @@ with tab_editor:
 
     colA, colB = st.columns([2, 2])
 
-    # ---------- LEFT SIDE ----------
     with colA:
         name = st.text_input("Name*", project["name"])
         pillar = st.selectbox("Pillar*", [""] + distinct_values("pillar"))
         priority = st.number_input("Priority", 1, 10, int(project["priority"] or 1))
         description = st.text_area("Description", project.get("description", ""))
 
-    # ---------- RIGHT SIDE ----------
     with colB:
         owner = st.text_input("Owner", project.get("owner", ""))
         status = st.selectbox("Status", [""] + distinct_values("status"))
@@ -219,7 +204,6 @@ with tab_editor:
             disabled=True
         )
 
-    # ---------- Clean Inputs ----------
     start_str = start_date.strftime("%Y-%m-%d")
     due_str = due_date.strftime("%Y-%m-%d")
 
@@ -229,7 +213,6 @@ with tab_editor:
 
     c1, c2, c3 = st.columns(3)
 
-    # ---------- SAVE ----------
     if c1.button("New / Save"):
 
         if not name.strip():
@@ -276,27 +259,45 @@ with tab_editor:
                 )
                 st.success("Project updated.")
 
-    # ---------- DELETE ----------
     if c2.button("Delete") and selected != "New Project":
         with conn() as c:
             c.execute("DELETE FROM projects WHERE id=?", (project["id"],))
         st.warning("Project deleted.")
 
-    # ---------- CLEAR ----------
     if c3.button("Clear"):
         st.experimental_rerun()
-
 
 # ----------------------------------------------------------
 # TAB: DASHBOARD
 # ----------------------------------------------------------
 
 with tab_dashboard:
+
     st.markdown("## Dashboard")
 
-    # -----------------------------------------------
-    # TOP FILTER BAR
-    # -----------------------------------------------
+    # ---------- EXPORT BLOCK ----------
+    st.markdown("### Export Projects + Update History")
+
+    if st.button("Download CSV Export"):
+        with conn() as c:
+            projects = pd.read_sql_query("SELECT * FROM projects", c)
+            history = pd.read_sql_query("SELECT * FROM project_updates", c)
+
+        merged = history.merge(
+            projects,
+            left_on="project_id",
+            right_on="id",
+            suffixes=("_update", "_project")
+        )
+
+        st.download_button(
+            label="Download .csv",
+            data=merged.to_csv(index=False),
+            file_name="portfolio_with_update_history.csv",
+            mime="text/csv"
+        )
+
+    # ---------- FILTERS ----------
     colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
 
     pillars = ["All"] + distinct_values("pillar")
@@ -322,9 +323,7 @@ with tab_dashboard:
 
     data = fetch_df(filters)
 
-    # -----------------------------------------------
-    # YEAR FILTER BLOCK
-    # -----------------------------------------------
+    # ---------- YEAR FILTER ----------
     st.markdown("### ")
 
     colY1, colY2, colY3, _ = st.columns([1, 1, 2, 2])
@@ -343,15 +342,11 @@ with tab_dashboard:
 
     st.markdown("---")
 
-    # -----------------------------------------------
-    # METRIC COUNTERS (Option C Logic)
-    # -----------------------------------------------
-
+    # ---------- METRICS ----------
     data["is_completed"] = (data["status"] == "Completed") & (data["progress"] == 100)
     data["is_ongoing"] = ~data["is_completed"]
 
     colM1, colM2, colM3, colM4 = st.columns(4)
-
     colM1.metric("Projects", len(data))
     colM2.metric("Completed", int(data["is_completed"].sum()))
     colM3.metric("Ongoing", int(data["is_ongoing"].sum()))
@@ -359,10 +354,7 @@ with tab_dashboard:
 
     st.markdown("---")
 
-    # -----------------------------------------------
-    # BAR CHART - Completed vs Ongoing by Pillar
-    # -----------------------------------------------
-
+    # ---------- BAR CHART ----------
     by_pillar = (
         data.groupby(["pillar", "is_completed"])
         .size()
@@ -384,10 +376,7 @@ with tab_dashboard:
         )
         st.plotly_chart(fig1, use_container_width=True)
 
-    # -----------------------------------------------
-    # TOP N PROJECTS PER PILLAR (by priority)
-    # -----------------------------------------------
-
+    # ---------- TOP N TABLE ----------
     st.markdown("### Top Projects per Pillar")
     top_df = data.sort_values("priority").groupby("pillar").head(top_n)
 
@@ -398,11 +387,7 @@ with tab_dashboard:
 
     st.markdown("---")
 
-    # -----------------------------------------------
-    # DETAILED PROJECT TABLE WITH PROGRESS BARS
-    # -----------------------------------------------
-
-    # HTML progress bar
+    # ---------- DETAILED TABLE ----------
     def render_progress_bar(p):
         color = progress_color(p)
         return f"""
@@ -434,6 +419,7 @@ with tab_dashboard:
 # ----------------------------------------------------------
 
 with tab_roadmap:
+
     st.markdown("## Roadmap")
 
     data = fetch_df({})
