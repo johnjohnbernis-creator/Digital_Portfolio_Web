@@ -40,6 +40,19 @@ def safe_migrate():
                 "ALTER TABLE projects ADD COLUMN progress_status TEXT DEFAULT '';"
             )
 
+        # --- NEW: add created_at / updated_at if absent (defensive) ---
+        cur.execute(
+            "SELECT name FROM pragma_table_info('projects') WHERE name='created_at';"
+        )
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE projects ADD COLUMN created_at TEXT;")
+
+        cur.execute(
+            "SELECT name FROM pragma_table_info('projects') WHERE name='updated_at';"
+        )
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE projects ADD COLUMN updated_at TEXT;")
+
 
 safe_migrate()
 
@@ -69,7 +82,13 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
     q += " ORDER BY COALESCE(start_date,''), COALESCE(due_date,'')"
 
     with conn() as c:
-        return pd.read_sql_query(q, c, params=args)
+        df = pd.read_sql_query(q, c, params=args)
+    # Ensure types
+    if "priority" in df.columns:
+        df["priority"] = pd.to_numeric(df["priority"], errors="coerce").fillna(0).astype(int)
+    if "progress" in df.columns:
+        df["progress"] = pd.to_numeric(df["progress"], errors="coerce").fillna(0).astype(int)
+    return df
 
 
 def distinct_values(col: str) -> List[str]:
@@ -197,8 +216,8 @@ with tab_editor:
         progress = st.slider("Progress (%)", 0, 100, int(project.get("progress", 0)))
 
         st.text_input(
-            "Update Tag (automatic)", 
-            project.get("progress_status", ""), 
+            "Update Tag (automatic)",
+            project.get("progress_status", ""),
             disabled=True
         )
 
@@ -210,15 +229,14 @@ with tab_editor:
     status_clean = status.strip() or None
     owner_clean = owner.strip() or None
 
-    c1, c2, c3 = st.columns(3)
+    # --- NEW: Button row matching your screenshot ---
+    c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 1, 2, 1])
 
-    # ---- SAVE ----
+    # ---- NEW / SAVE ----
     if c1.button("New / Save"):
-
         if not name.strip():
             st.error("Name is required.")
             st.stop()
-
         if not pillar_clean:
             st.error("Pillar is required.")
             st.stop()
@@ -239,8 +257,8 @@ with tab_editor:
                      start_str, due_str, now, now, progress, tag),
                 )
                 st.success("Project added.")
-
             else:
+                # If user hits New/Save while an existing is selected, we treat as upsert/update
                 c.execute(
                     """
                     UPDATE projects
@@ -253,90 +271,4 @@ with tab_editor:
                 )
                 st.success("Project updated.")
 
-    if c2.button("Delete") and selected != "New Project":
-        with conn() as c:
-            c.execute("DELETE FROM projects WHERE id=?", (project["id"],))
-        st.warning("Project deleted.")
-
-    if c3.button("Clear"):
-        st.experimental_rerun()
-
-
-# ----------------------------------------------------------
-# TAB: DASHBOARD
-# ----------------------------------------------------------
-
-with tab_dashboard:
-    st.markdown("## Dashboard")
-
-    colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
-
-    pillars = ["All"] + distinct_values("pillar")
-    statuses = ["All"] + distinct_values("status")
-    owners = ["All"] + distinct_values("owner")
-    priority_vals = distinct_values("priority")
-    priority_opts = ["All"] + sorted(set(priority_vals)) if priority_vals else ["All"]
-
-    pillar_f = colF1.selectbox("Pillar", pillars)
-    status_f = colF2.selectbox("Status", statuses)
-    owner_f = colF3.selectbox("Owner", owners)
-    priority_f = colF4.selectbox("Priority", priority_opts)
-    search_f = colF6.text_input("Search")
-
-    filters = dict(
-        pillar=pillar_f, status=status_f, owner=owner_f,
-        priority=priority_f, search=search_f
-    )
-
-    data = fetch_df(filters)
-
-    st.markdown("---")
-    st.subheader("Projects Overview")
-
-    def render_progress_bar(p):
-        color = progress_color(p)
-        return f"""
-        <div style="width:100%;background:#eee;border-radius:8px;">
-            <div style="width:{p}%;background:{color};
-                padding:6px;border-radius:8px;text-align:center;color:white;">
-                {p}%
-            </div>
-        </div>
-        """
-
-    data["Progress Bar"] = data["progress"].apply(render_progress_bar)
-
-    st.write(
-        data[[
-            "name", "pillar", "priority", "owner", "status",
-            "progress", "progress_status", "Progress Bar"
-        ]].to_html(escape=False), unsafe_allow_html=True
-    )
-
-
-# ----------------------------------------------------------
-# TAB: ROADMAP
-# ----------------------------------------------------------
-
-with tab_roadmap:
-    st.markdown("## Roadmap")
-
-    data = fetch_df({})
-
-    gantt = data.copy()
-    gantt["Start"] = pd.to_datetime(gantt["start_date"], errors="coerce")
-    gantt["Finish"] = pd.to_datetime(gantt["due_date"], errors="coerce")
-    gantt = gantt.dropna(subset=["Start", "Finish"])
-
-    if not gantt.empty:
-        fig = px.timeline(
-            gantt,
-            x_start="Start",
-            x_end="Finish",
-            y="name",
-            color="pillar",
-            hover_data=["progress", "progress_status"]
-        )
-        fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig, use_container_width=True)
-
+    # ---- NEW: Explicit UPDATE button (only applies if not 'New Project') ----
