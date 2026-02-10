@@ -10,6 +10,13 @@ import pandas as pd
 import plotly.express as px
 import plotly.io as pio
 import streamlit as st
+# Optional Kaleido support (for Plotly image export)
+try:
+    import kaleido  # noqa: F401
+    KALEIDO_AVAILABLE = True
+except Exception:
+    KALEIDO_AVAILABLE = False
+
 
 # Optional PDF support (recommended). If not installed, PDF export will be disabled.
 try:
@@ -571,11 +578,11 @@ if show_table:
     else:
         st.info("No projects match your current filters.")
 
-# ------------------ Export Options (OUTSIDE any form) ------------------
+# ------------------ Export Options ------------------
 st.markdown("---")
 st.subheader("Export Options")
 
-# Filtered CSV
+# ---------- CSV (Filtered) ----------
 filtered_csv = data.to_csv(index=False).encode("utf-8")
 st.download_button(
     label="⬇️ Download CSV Report (Filtered)",
@@ -585,7 +592,7 @@ st.download_button(
     key="export_csv_filtered",
 )
 
-# Full DB CSV
+# ---------- CSV (Full DB) ----------
 full_df = fetch_all_projects()
 full_csv = full_df.to_csv(index=False).encode("utf-8")
 st.download_button(
@@ -596,37 +603,43 @@ st.download_button(
     key="export_csv_full_db",
 )
 
-# Printable PDF (Filtered) — reliable "Print Report"
+# ---------- PDF Export ----------
 if REPORTLAB_AVAILABLE:
-    try:
-        pdf_bytes = build_pdf_report(data, title="Digital Portfolio Report (Filtered)")
-        st.download_button(
-            label="🖨️ Download Printable Report (PDF)",
-            data=pdf_bytes,
-            file_name="portfolio_report_filtered.pdf",
-            mime="application/pdf",
-            key="export_pdf_filtered",
-        )
-    except Exception as e:
-        st.warning(f"PDF export failed: {e}")
+    pdf_bytes = build_pdf_report(data, title="Digital Portfolio Report (Filtered)")
+    st.download_button(
+        label="🖨️ Download Printable Report (PDF)",
+        data=pdf_bytes,
+        file_name="portfolio_report_filtered.pdf",
+        mime="application/pdf",
+        key="export_pdf_filtered",
+    )
 else:
-    st.info("PDF export disabled (reportlab not installed).")
+    st.info("📄 PDF export disabled (optional dependency not installed).")
 
-# Roadmap image export (PNG)
+# ------------------ Roadmap Export ------------------
 if roadmap_fig is not None:
-    st.markdown("#### Export Roadmap Image")
-    try:
-        # Requires Kaleido/Chrome in the runtime environment.
+    st.markdown("---")
+    st.subheader("Export Roadmap")
+
+    # ✅ Always-works HTML export (no dependencies)
+    roadmap_html = roadmap_fig.to_html(include_plotlyjs="cdn")
+    st.download_button(
+        label="🌐 Download Roadmap (Interactive HTML)",
+        data=roadmap_html,
+        file_name="roadmap.html",
+        mime="text/html",
+        key="export_roadmap_html",
+    )
+
+    # ✅ PNG only if Kaleido is available
+    if KALEIDO_AVAILABLE:
         img_bytes = pio.to_image(roadmap_fig, format="png", scale=2)
         st.download_button(
-            "📸 Download Roadmap as PNG",
+            label="📸 Download Roadmap (PNG)",
             data=img_bytes,
             file_name="roadmap.png",
             mime="image/png",
             key="export_roadmap_png",
         )
-    except Exception as e:
-        st.warning(
-            "Roadmap image export failed. This typically means Kaleido/Chrome isn't available. "
-            f"Error: {e}"
-        )
+    else:
+        st.info("🖼️ PNG export disabled (Kaleido/Chrome not available).")
