@@ -81,7 +81,65 @@ st.title("Digital Portfolio — Web Version")
 if not os.path.exists(DB_PATH):
     st.error("Database not found.")
     st.stop()
+# ---------- Project Editor ----------
+st.markdown("---")
+st.subheader("Project Editor")
+# Load existing project list for editing
+with conn() as c:
+    df_projects = pd.read_sql_query(f"SELECT id, name FROM {TABLE} ORDER BY name", c)
 
+project_options = ["<New Project>"] + [
+    f"{row['id']} — {row['name']}" for _, row in df_projects.iterrows()
+]
+
+selected_project = st.selectbox("Select Project to Edit", project_options)
+# Load distinct values for dropdowns
+pillar_list = distinct_values("pillar")
+status_list = distinct_values("status")
+owner_list = distinct_values("owner")
+
+with st.form("project_form"):
+    c1, c2 = st.columns(2)
+
+    # LEFT COLUMN
+    project_name = c1.text_input("Name*")
+    project_pillar = c1.selectbox("Pillar*", [""] + pillar_list)
+    project_priority = c1.number_input("Priority", min_value=1, max_value=99, value=5)
+
+    # RIGHT COLUMN
+    project_owner = c2.selectbox("Owner", [""] + owner_list)
+    project_status = c2.selectbox("Status", [""] + status_list)
+
+    start_date = c2.date_input("Start Date", value=date.today())
+    due_date = c2.date_input("Due Date", value=date.today())
+
+    description = st.text_area("Description", height=120)
+
+    submitted = st.form_submit_button("Save Project")
+
+# Handle form submission
+if submitted:
+    if not project_name or not project_pillar:
+        st.error("Name and Pillar are required.")
+    else:
+        with conn() as c:
+            c.execute(f"""
+                INSERT INTO {TABLE}
+                (name, pillar, priority, description, owner, status, start_date, due_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                project_name,
+                project_pillar,
+                project_priority,
+                description,
+                project_owner,
+                project_status,
+                to_iso(start_date),
+                to_iso(due_date)
+            ))
+            c.commit()
+        st.success("Project saved successfully!")
+        st.rerun()
 # ---- Global Filters ----
 colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
 
