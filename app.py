@@ -84,7 +84,8 @@ if not os.path.exists(DB_PATH):
 # ---------- Project Editor ----------
 st.markdown("---")
 st.subheader("Project Editor")
-# Load existing project list for editing
+
+# Load project list for editing
 with conn() as c:
     df_projects = pd.read_sql_query(f"SELECT id, name FROM {TABLE} ORDER BY name", c)
 
@@ -93,56 +94,58 @@ project_options = ["<New Project>"] + [
 ]
 
 selected_project = st.selectbox("Select Project to Edit", project_options)
-# Load selected project record
+
+# Load selected project
 loaded_project = None
 if selected_project != "<New Project>":
     project_id = int(selected_project.split(" — ")[0])
     with conn() as c:
         df = pd.read_sql_query(f"SELECT * FROM {TABLE} WHERE id=?", c, params=[project_id])
-    if not df.empty:
-        loaded_project = df.iloc[0].to_dict()
-# Load distinct values for dropdowns
+        if not df.empty:
+            loaded_project = df.iloc[0].to_dict()
+
+# Dropdown value lists
 pillar_list = distinct_values("pillar")
 status_list = distinct_values("status")
 owner_list = distinct_values("owner")
 
+# ---------- FORM ----------
 with st.form("project_form"):
+
     c1, c2 = st.columns(2)
-# ---- ACTION BUTTONS (outside the form) ----
-bcol1, bcol2, bcol3, bcol4, bcol5 = st.columns([1, 1, 1, 1, 2])
 
-new_clicked    = bcol1.button("New")
-save_clicked   = bcol2.button("Save (Insert)")
-update_clicked = bcol3.button("Update")
-delete_clicked = bcol4.button("Delete")
-clear_clicked  = bcol5.button("Clear")
-    # LEFT COLUMN
-# Pre-fill fields if editing
-name_val = loaded_project["name"] if loaded_project else ""
-pillar_val = loaded_project["pillar"] if loaded_project else ""
-priority_val = loaded_project["priority"] if loaded_project else 5
-owner_val = loaded_project["owner"] if loaded_project else ""
-status_val = loaded_project["status"] if loaded_project else ""
-start_val = try_date(loaded_project["start_date"]) if loaded_project else date.today()
-due_val = try_date(loaded_project["due_date"]) if loaded_project else date.today()
-desc_val = loaded_project["description"] if loaded_project else ""
+    # Prefill defaults
+    name_val = loaded_project["name"] if loaded_project else ""
+    pillar_val = loaded_project["pillar"] if loaded_project else ""
+    priority_val = loaded_project["priority"] if loaded_project else 5
+    owner_val = loaded_project["owner"] if loaded_project else ""
+    status_val = loaded_project["status"] if loaded_project else ""
+    start_val = try_date(loaded_project["start_date"]) if loaded_project else date.today()
+    due_val = try_date(loaded_project["due_date"]) if loaded_project else date.today()
+    desc_val = loaded_project["description"] if loaded_project else ""
 
-project_name = c1.text_input("Name*", value=name_val)
-project_pillar = c1.selectbox("Pillar*", [""] + pillar_list, index=([""]+pillar_list).index(pillar_val) if pillar_val in pillar_list else 0)
-project_priority = c1.number_input("Priority", min_value=1, max_value=99, value=priority_val)
+    # ---- LEFT COLUMN ----
+    project_name = c1.text_input("Name*", value=name_val)
+    project_pillar = c1.selectbox("Pillar*", [""] + pillar_list,
+                                  index=([""]+pillar_list).index(pillar_val) if pillar_val in pillar_list else 0)
+    project_priority = c1.number_input("Priority", min_value=1, max_value=99, value=priority_val)
 
-project_owner = c2.selectbox("Owner", [""] + owner_list, index=([""]+owner_list).index(owner_val) if owner_val in owner_list else 0)
-project_status = c2.selectbox("Status", [""] + status_list, index=([""]+status_list).index(status_val) if status_val in status_list else 0)
+    # ---- RIGHT COLUMN ----
+    project_owner = c2.selectbox("Owner", [""] + owner_list,
+                                 index=([""]+owner_list).index(owner_val) if owner_val in owner_list else 0)
+    project_status = c2.selectbox("Status", [""] + status_list,
+                                  index=([""]+status_list).index(status_val) if status_val in status_list else 0)
+    start_date = c2.date_input("Start Date", value=start_val)
+    due_date = c2.date_input("Due Date", value=due_val)
 
-start_date = c2.date_input("Start Date", value=start_val)
-due_date = c2.date_input("Due Date", value=due_val)
+    description = st.text_area("Description", value=desc_val, height=120)
 
-description = st.text_area("Description", value=desc_val, height=120)
-
-col_a, col_b, col_c = st.columns(3)
-submitted_new = col_a.form_submit_button("Save New")
-submitted_update = col_b.form_submit_button("Update")
-submitted_delete = col_c.form_submit_button("Delete")
+    # ---- FORM SUBMIT BUTTONS ----
+    col_a, col_b, col_c = st.columns(3)
+    submitted_new    = col_a.form_submit_button("Save New")
+    submitted_update = col_b.form_submit_button("Update")
+    submitted_delete = col_c.form_submit_button("Delete")
+``
 
 # ---- CRUD ACTIONS ----
 
