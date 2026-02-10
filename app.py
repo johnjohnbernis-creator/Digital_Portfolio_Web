@@ -21,26 +21,29 @@ def choose_or_type(
     existing_values: List[str],
     default_value: str = "",
     manual_label: str = "➕ Type manually…",
+    key_prefix: str = "",
 ) -> tuple[str, bool]:
     """
-    Returns (final_value, used_manual) where:
-      - final_value: chosen or typed value (stripped)
-      - used_manual: True if user typed manually
+    Choose from known values or type a new one.
+    key_prefix MUST be unique per usage to avoid DuplicateWidgetID.
     """
     options = [manual_label] + existing_values
 
-    # Default to existing value if available, otherwise manual entry
     if default_value and default_value in existing_values:
-        idx = options.index(default_value) if default_value in options else 0
+        idx = options.index(default_value)
     else:
-        idx = 0  # "➕ Type manually…"
+        idx = 0
 
-    choice = st.selectbox(label, options, index=idx)
+    sel_key = f"{key_prefix}__select"
+    txt_key = f"{key_prefix}__text"
+
+    choice = st.selectbox(label, options, index=idx, key=sel_key)
     if choice == manual_label:
-        typed = st.text_input(f"{label} (manual entry)", value=(default_value or ""))
+        typed = st.text_input(f"{label} (manual entry)", value=(default_value or ""), key=txt_key)
         return typed.strip(), True
     else:
         return choice.strip(), False
+
 
 
 # ------------------ Utilities ------------------
@@ -213,7 +216,7 @@ if clear_clicked:
     st.toast("Cleared filters.", icon="✅")
 
 # ------------------ Form (inputs + submit buttons) ------------------
-with st.form("project_form"):
+wwith st.form("project_form"):
     c1, c2 = st.columns(2)
 
     # Defaults for form fields
@@ -222,24 +225,26 @@ with st.form("project_form"):
     priority_val = int(loaded_project.get("priority", 5)) if loaded_project else 5
     owner_val = loaded_project.get("owner") if loaded_project else ""
     status_val = loaded_project.get("status") if loaded_project else ""
-    start_val = (
-        try_date(loaded_project.get("start_date")) if loaded_project else date.today()
-    )
+    start_val = try_date(loaded_project.get("start_date")) if loaded_project else date.today()
     due_val = try_date(loaded_project.get("due_date")) if loaded_project else date.today()
     desc_val = loaded_project.get("description") if loaded_project else ""
 
     # ---- LEFT COLUMN ----
     with c1:
-        project_name = st.text_input("Name*", value=name_val)
+        project_name = st.text_input("Name*", value=name_val, key="editor_name")
+
         project_pillar, pillar_used_manual = choose_or_type(
             label="Pillar*",
             existing_values=pillar_list,
             default_value=pillar_val or "",
+            key_prefix="editor_pillar",
         )
+
         project_priority = st.number_input(
-            "Priority", min_value=1, max_value=99, value=priority_val
+            "Priority", min_value=1, max_value=99, value=priority_val, key="editor_priority"
         )
-        description = st.text_area("Description", value=desc_val, height=120)
+
+        description = st.text_area("Description", value=desc_val, height=120, key="editor_desc")
 
     # ---- RIGHT COLUMN ----
     with c2:
@@ -247,7 +252,24 @@ with st.form("project_form"):
             label="Owner",
             existing_values=owner_list,
             default_value=owner_val or "",
+            key_prefix="editor_owner",
         )
+
+        project_status = st.selectbox(
+            "Status",
+            [""] + status_list,
+            index=safe_index([""] + status_list, status_val),
+            key="editor_status",
+        )  # selectbox supports key [1](https://peerdh.com/blogs/programming-insights/streamlits-download-button-a-comprehensive-guide)
+
+        start_date = st.date_input("Start Date", value=start_val, key="editor_start")
+        due_date = st.date_input("Due Date", value=due_val, key="editor_due")
+
+    # ---- FORM SUBMIT BUTTONS ----
+    col_a, col_b, col_c = st.columns(3)
+    submitted_new = col_a.form_submit_button("Save New")
+    submitted_update = col_b.form_submit_button("Update")
+    submitted_delete = col_c.form_submit_button("Delete")
         project_status = st.selectbox(
             "Status", [""] + status_list, index=safe_index([""] + status_list, status_val)
         )
