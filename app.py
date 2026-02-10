@@ -93,6 +93,14 @@ project_options = ["<New Project>"] + [
 ]
 
 selected_project = st.selectbox("Select Project to Edit", project_options)
+# Load selected project record
+loaded_project = None
+if selected_project != "<New Project>":
+    project_id = int(selected_project.split(" — ")[0])
+    with conn() as c:
+        df = pd.read_sql_query(f"SELECT * FROM {TABLE} WHERE id=?", c, params=[project_id])
+    if not df.empty:
+        loaded_project = df.iloc[0].to_dict()
 # Load distinct values for dropdowns
 pillar_list = distinct_values("pillar")
 status_list = distinct_values("status")
@@ -102,23 +110,37 @@ with st.form("project_form"):
     c1, c2 = st.columns(2)
 
     # LEFT COLUMN
-    project_name = c1.text_input("Name*")
-    project_pillar = c1.selectbox("Pillar*", [""] + pillar_list)
-    project_priority = c1.number_input("Priority", min_value=1, max_value=99, value=5)
+# Pre-fill fields if editing
+name_val = loaded_project["name"] if loaded_project else ""
+pillar_val = loaded_project["pillar"] if loaded_project else ""
+priority_val = loaded_project["priority"] if loaded_project else 5
+owner_val = loaded_project["owner"] if loaded_project else ""
+status_val = loaded_project["status"] if loaded_project else ""
+start_val = try_date(loaded_project["start_date"]) if loaded_project else date.today()
+due_val = try_date(loaded_project["due_date"]) if loaded_project else date.today()
+desc_val = loaded_project["description"] if loaded_project else ""
 
-    # RIGHT COLUMN
-    project_owner = c2.selectbox("Owner", [""] + owner_list)
-    project_status = c2.selectbox("Status", [""] + status_list)
+project_name = c1.text_input("Name*", value=name_val)
+project_pillar = c1.selectbox("Pillar*", [""] + pillar_list, index=([""]+pillar_list).index(pillar_val) if pillar_val in pillar_list else 0)
+project_priority = c1.number_input("Priority", min_value=1, max_value=99, value=priority_val)
 
-    start_date = c2.date_input("Start Date", value=date.today())
-    due_date = c2.date_input("Due Date", value=date.today())
+project_owner = c2.selectbox("Owner", [""] + owner_list, index=([""]+owner_list).index(owner_val) if owner_val in owner_list else 0)
+project_status = c2.selectbox("Status", [""] + status_list, index=([""]+status_list).index(status_val) if status_val in status_list else 0)
 
-    description = st.text_area("Description", height=120)
+start_date = c2.date_input("Start Date", value=start_val)
+due_date = c2.date_input("Due Date", value=due_val)
 
-    submitted = st.form_submit_button("Save Project")
+description = st.text_area("Description", value=desc_val, height=120)
 
-# Handle form submission
-if submitted:
+col_a, col_b, col_c = st.columns(3)
+submitted_new = col_a.form_submit_button("Save New")
+submitted_update = col_b.form_submit_button("Update")
+submitted_delete = col_c.form_submit_button("Delete")
+
+# ---- CRUD ACTIONS ----
+
+# CREATE
+if submitted_new:
     if not project_name or not project_pillar:
         st.error("Name and Pillar are required.")
     else:
@@ -138,8 +160,38 @@ if submitted:
                 to_iso(due_date)
             ))
             c.commit()
-        st.success("Project saved successfully!")
+        st.success("Project created!")
         st.rerun()
+
+# UPDATE
+if submitted_update and loaded_project:
+    with conn() as c:
+        c.execute(f"""
+            UPDATE {TABLE}
+            SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?
+            WHERE id=?
+        """, (
+            project_name,
+            project_pillar,
+            project_priority,
+            description,
+            project_owner,
+            project_status,
+            to_iso(start_date),
+            to_iso(due_date),
+            loaded_project["id"]
+        ))
+        c.commit()
+    st.success("Project updated!")
+    st.rerun()
+
+# DELETE
+if submitted_delete and loaded_project:
+    with conn() as c:
+        c.execute(f"DELETE FROM {TABLE} WHERE id=?", (loaded_project["id"],))
+        c.commit()
+    st.warning("Project deleted.")
+    st.rerun()
 # ---- Global Filters ----
 colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
 
