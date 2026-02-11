@@ -45,10 +45,9 @@ EXPECTED_COLUMNS = {
     "status": "TEXT",
     "start_date": "TEXT",
     "due_date": "TEXT",
-
-    # NEW FIELDS:
-    "plainsware_project": "TEXT DEFAULT 'No'",   # 'Yes'/'No'
-    "plainsware_number": "INTEGER",             # optional, only if plainsware_project == 'Yes'
+    # NEW:
+    "plainsware_project": "TEXT DEFAULT 'No'",  # Yes/No
+    "plainsware_number": "INTEGER",            # required only if Yes
 }
 
 
@@ -57,16 +56,11 @@ def conn() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
-def table_info(table: str) -> pd.DataFrame:
-    with conn() as c:
-        return pd.read_sql_query(f"PRAGMA table_info({table})", c)
-
-
 def ensure_schema_and_migrate() -> None:
     """
     Ensure the projects table exists and matches EXPECTED_COLUMNS.
-    If the existing table has extra NOT NULL columns (no default) or missing required cols,
-    rebuild the table and copy common columns.
+    Adds missing nullable/defaulted columns safely. If table has required-column issues
+    or extra NOT NULL columns with no default, rebuild table and copy common columns.
     """
     with conn() as c:
         # Base create (new installs)
@@ -92,15 +86,16 @@ def ensure_schema_and_migrate() -> None:
         info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
         existing_cols = info["name"].tolist()
 
-        # Add missing nullable columns we can add safely
+        # Add missing columns (safe ones)
         missing = [col for col in EXPECTED_COLUMNS.keys() if col not in existing_cols]
         for col in missing:
-            # SQLite cannot add NOT NULL columns without default reliably; rebuild for those.
-            if col in ("name", "pillar", "id"):
+            # Avoid trying to add NOT NULL required columns without default
+            if col in ("id", "name", "pillar"):
                 continue
             c.execute(f"ALTER TABLE {TABLE} ADD COLUMN {col} {EXPECTED_COLUMNS[col]}")
         c.commit()
 
+        # Reload
         info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
         existing_cols = info["name"].tolist()
 
@@ -109,7 +104,7 @@ def ensure_schema_and_migrate() -> None:
             _rebuild_projects_table(c)
             return
 
-        # Detect extra NOT NULL columns with no default (these break inserts)
+        # Detect extra NOT NULL columns with no default (these can break inserts)
         extra_notnull = info[
             (~info["name"].isin(EXPECTED_COLUMNS.keys()))
             & (info["notnull"] == 1)
@@ -298,7 +293,14 @@ def build_pdf_report(df: pd.DataFrame, title: str = "Digital Portfolio Report") 
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
 st.title("Digital Portfolio — Web Version")
 
-# ------------------ Session State (RESET FIX) ------------------
+ensure_schema_and_migrate()
+
+if not os.path.exists(DB_PATH):
+    st.error("Database not found.")
+    st.stop()
+
+
+# ------------------ Session State (safe reset pattern) ------------------
 # IMPORTANT: apply reset BEFORE widget instantiation (prevents StreamlitAPIException)
 if "project_selector" not in st.session_state:
     st.session_state.project_selector = NEW_LABEL
@@ -348,7 +350,6 @@ new_clicked = bcol1.button("New", key="btn_new_project")
 clear_clicked = bcol2.button("Clear Filters", key="btn_clear_filters")
 
 if new_clicked:
-    # Use reset flag (safe) instead of assigning project_selector after widget exists
     st.session_state.reset_project_selector = True
     st.rerun()
 
@@ -372,9 +373,9 @@ with st.form("project_form"):
     due_val = try_date(loaded_project.get("due_date")) if loaded_project else date.today()
     desc_val = loaded_project.get("description") if loaded_project else ""
 
-    # NEW: Plainsware defaults
-    plainsware_val = loaded_project.get("plainsware_project", "No") if loaded_project else "No"
-    plainsware_num_val = loaded_project.get("plainsware_number") if loaded_project else None
+    # Plainsware defaults (NEW)
+    pw_val = loaded_project.get("plainsware_project", "No") if loaded_project else "No"
+    pw_num_val = loaded_project.get("plainsware_number") if loaded_project else None
 
     # LEFT
     with c1:
@@ -408,7 +409,7 @@ with st.form("project_form"):
         owner_options = owner_list[:] if owner_list else [""]
         owner_index = owner_options.index(owner_val) if owner_val in owner_options else None
         project_owner = st.selectbox(
-            "Owner",
+            "Owner*",
             options=owner_options,
             index=owner_index,
             placeholder="Select or type a new owner…",
@@ -426,21 +427,20 @@ with st.form("project_form"):
         start_date = st.date_input("Start Date", value=start_val, key="editor_start")
         due_date = st.date_input("Due Date", value=due_val, key="editor_due")
 
-        # NEW: Plainsware fields
+        # Plainsware fields (NEW)
         plainsware_project = st.selectbox(
             "Plainsware Project?",
             ["No", "Yes"],
-            index=1 if str(plainsware_val).strip() == "Yes" else 0,
+            index=1 if str(pw_val).strip() == "Yes" else 0,
             key="editor_plainsware_project",
         )
 
         plainsware_number = None
         if plainsware_project == "Yes":
-            # Require a number when Yes
             default_num = 1
             try:
-                if plainsware_num_val is not None and str(plainsware_num_val).strip().isdigit():
-                    default_num = int(plainsware_num_val)
+                if pw_num_val is not None and str(pw_num_val).strip().isdigit():
+                    default_num = int(pw_num_val)
             except Exception:
                 pass
 
@@ -480,7 +480,6 @@ if submitted_new:
     if not project_owner_clean:
         errors.append("Owner is required.")
 
-    # NEW validation: if Plainsware Yes, require number
     pw_number_db = None
     if plainsware_project == "Yes":
         if plainsware_number is None:
@@ -549,7 +548,6 @@ if submitted_update:
         if not project_owner_clean:
             errors.append("Owner is required.")
 
-        # NEW validation: if Plainsware Yes, require number
         pw_number_db = None
         if plainsware_project == "Yes":
             if plainsware_number is None:
@@ -673,6 +671,7 @@ else:
 if year_f != ALL_LABEL:
     data = data[data[year_col] == int(year_f)]
 
+
 # ------------------ KPI Cards ------------------
 if show_kpi:
     st.markdown("---")
@@ -686,6 +685,7 @@ if show_kpi:
     k2.metric("Completed", completed)
     k3.metric("Ongoing", ongoing)
     k4.metric("Distinct Pillars", int(pillars_count))
+
 
 # ------------------ Pillar Status Chart ------------------
 if show_pillar_chart:
@@ -711,6 +711,7 @@ if show_pillar_chart:
     else:
         st.info("No data available for pillar chart.")
 
+
 # ------------------ Top N per Pillar ------------------
 st.markdown("---")
 st.subheader(f"Top {top_n} Projects per Pillar")
@@ -726,32 +727,37 @@ if not data.empty:
 else:
     st.info("No projects to display for Top N.")
 
+
 # ------------------ Roadmap ------------------
 roadmap_fig = None
 if show_roadmap:
     st.markdown("---")
-    st.subheader("Roadmap")
-
-    gantt = data.copy()
+    st.subheader("Roadmappy()
     gantt["Start"] = pd.to_datetime(gantt.get("start_date", ""), errors="coerce")
     gantt["Finish"] = pd.to_datetime(gantt.get("due_date", ""), errors="coerce")
     gantt = gantt.dropna(subset=["Start", "Finish"])
 
     if not gantt.empty:
         roadmap_fig = px.timeline(
-            gantt, x_start="Start", x_end="Finish", y="name", color="pillar",
-            title="Project Timeline"
+            gantt,
+            x_start="Start",
+            x_end="Finish",
+            y="name",
+            color="pillar",
+            title="Project Timeline",
         )
         roadmap_fig.update_yaxes(autorange="reversed")
         st.plotly_chart(roadmap_fig, use_container_width=True)
     else:
         st.info("No valid date ranges to draw the roadmap.")
 
+
 # ------------------ Projects Table ------------------
 if show_table:
     st.markdown("---")
     st.subheader("Projects")
     st.dataframe(data, use_container_width=True)
+
 
 # ------------------ Export Options (outside form) ------------------
 st.markdown("---")
@@ -808,4 +814,3 @@ if roadmap_fig is not None:
             )
         except Exception as e:
             st.info(f"PNG export unavailable in this runtime: {e}")
-
