@@ -37,7 +37,6 @@ ALL_LABEL = "All"
 
 
 def now_ts() -> str:
-    # store as text for SQLite portability
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -56,7 +55,7 @@ EXPECTED_COLUMNS = {
     "plainsware_project": "TEXT DEFAULT 'No'",
     "plainsware_number": "INTEGER",
 
-    # Timestamps (to prevent NOT NULL failures)
+    # Timestamps
     "created_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
     "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
 }
@@ -72,11 +71,7 @@ def _table_info_df(c: sqlite3.Connection) -> pd.DataFrame:
 
 
 def _needs_rebuild_due_to_created_at(info: pd.DataFrame) -> bool:
-    """
-    Rebuild if created_at exists and is NOT NULL but has no default.
-    That configuration causes inserts to fail unless the app always supplies it.
-    We ALSO supply it, but rebuilding stabilizes schema for future migrations.
-    """
+    """Rebuild if created_at exists and is NOT NULL but has no default."""
     if info.empty:
         return False
     row = info[info["name"] == "created_at"]
@@ -84,7 +79,6 @@ def _needs_rebuild_due_to_created_at(info: pd.DataFrame) -> bool:
         return False
     notnull = int(row.iloc[0]["notnull"]) == 1
     dflt = row.iloc[0]["dflt_value"]
-    # dflt_value is None/NaN/'' for "no default"
     no_default = pd.isna(dflt) or str(dflt).strip() == ""
     return bool(notnull and no_default)
 
@@ -98,7 +92,7 @@ def ensure_schema_and_migrate() -> None:
     - Adds missing columns via ALTER TABLE ADD COLUMN
     """
     with conn() as c:
-        # 1) Base create (new installs)
+        # Base create
         c.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -121,11 +115,9 @@ def ensure_schema_and_migrate() -> None:
         c.commit()
 
         info = _table_info_df(c)
-        existing_cols = info["name"].tolist()
-        existing_set = set(existing_cols)
+        existing_set = set(info["name"].tolist())
 
-        # 2) Rename common legacy columns if present (modern SQLite supports RENAME COLUMN)
-        # If it fails (older sqlite), we rebuild instead.
+        # Rename legacy typo columns if present (fallback to rebuild on failure)
         if "plainsware_proj" in existing_set and "plainsware_project" not in existing_set:
             try:
                 c.execute(f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_proj" TO "plainsware_project"')
@@ -140,19 +132,17 @@ def ensure_schema_and_migrate() -> None:
             except Exception:
                 _rebuild_projects_table(c)
 
-        # refresh after renames
+        # Refresh
         info = _table_info_df(c)
-        existing_cols = info["name"].tolist()
-        existing_set = set(existing_cols)
+        existing_set = set(info["name"].tolist())
 
-        # 3) If created_at is NOT NULL and has no default, rebuild to stabilize schema
+        # If created_at is NOT NULL and has no default, rebuild
         if _needs_rebuild_due_to_created_at(info):
             _rebuild_projects_table(c)
             info = _table_info_df(c)
-            existing_cols = info["name"].tolist()
-            existing_set = set(existing_cols)
+            existing_set = set(info["name"].tolist())
 
-        # 4) If there are ANY extra NOT NULL columns without default (can break inserts), rebuild
+        # If there are ANY extra NOT NULL columns w/ no default (can break inserts), rebuild
         extra_notnull = info[
             (~info["name"].isin(EXPECTED_COLUMNS.keys()))
             & (info["notnull"] == 1)
@@ -161,10 +151,9 @@ def ensure_schema_and_migrate() -> None:
         if not extra_notnull.empty:
             _rebuild_projects_table(c)
             info = _table_info_df(c)
-            existing_cols = info["name"].tolist()
-            existing_set = set(existing_cols)
+            existing_set = set(info["name"].tolist())
 
-        # 5) Add missing columns
+        # Add missing columns
         for col, ddl in EXPECTED_COLUMNS.items():
             if col not in existing_set:
                 if col in ("id", "name", "pillar"):
@@ -179,10 +168,7 @@ def ensure_schema_and_migrate() -> None:
 
 
 def _rebuild_projects_table(c: sqlite3.Connection) -> None:
-    """
-    Rebuild projects table to match EXPECTED schema, copying intersecting columns.
-    Keeps existing values when possible; allows defaults for missing columns.
-    """
+    """Rebuild projects table to match expected schema, copying intersecting columns."""
     old_info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
     old_cols = old_info["name"].tolist()
 
@@ -191,7 +177,6 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
         "plainsware_num": "plainsware_number",
     }
 
-    # Build copy lists (old -> new)
     keep_old = []
     keep_new = []
     for col in old_cols:
@@ -225,8 +210,6 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
         """
     )
 
-    # Copy what we can. If created_at/updated_at are absent in old table,
-    # omit them so defaults apply in the new table.
     if keep_old:
         src = ", ".join(keep_old)
         dst = ", ".join(keep_new)
@@ -237,7 +220,7 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
             """
         )
 
-    # Ensure timestamps are not null (in case they got copied as empty)
+    # Ensure timestamps are not null
     c.execute(f"UPDATE {TABLE}__new SET created_at = COALESCE(NULLIF(created_at,''), CURRENT_TIMESTAMP)")
     c.execute(f"UPDATE {TABLE}__new SET updated_at = COALESCE(NULLIF(updated_at,''), CURRENT_TIMESTAMP)")
 
@@ -400,7 +383,7 @@ if not os.path.exists(DB_PATH):
 
 
 # ------------------ Session State (safe reset pattern) ------------------
-# Streamlit disallows setting st.session_state[key] after widget with that key exists. [5](https://outlook.office365.com/owa/?ItemID=AAMkADRkMzFkODc1LTFiODYtNGZkZC05NzE1LTAyZDNhZGU1NGY3OQBGAAAAAABRIcoyzCehQ69BIiGMo9kFBwC16yeSS83pQK4Sv2%2fkdD%2bVAAAEZYj0AADs9ViQy20VQqHBo8Jt7KtfAAglo0fQAAA%3d&exvsurl=1&viewmodel=ReadMessageItem)[6](https://outlook.office365.com/owa/?ItemID=AAMkADRkMzFkODc1LTFiODYtNGZkZC05NzE1LTAyZDNhZGU1NGY3OQBGAAAAAABRIcoyzCehQ69BIiGMo9kFBwC16yeSS83pQK4Sv2%2fkdD%2bVAAAEZYj0AADs9ViQy20VQqHBo8Jt7KtfAAgr77WlAAA%3d&exvsurl=1&viewmodel=ReadMessageItem)
+# Streamlit disallows setting st.session_state[key] after the widget is created. [2](https://jnj.sharepoint.com/teams/ITAS_GSD_Team/Shared%20Documents/EAS%20Team%20LTIM/Compliance/Infobelt/OAM%20User%20Guide%20-v2.pdf?web=1)
 if "project_selector" not in st.session_state:
     st.session_state.project_selector = NEW_LABEL
 if "reset_project_selector" not in st.session_state:
@@ -408,6 +391,21 @@ if "reset_project_selector" not in st.session_state:
 if st.session_state.reset_project_selector:
     st.session_state.project_selector = NEW_LABEL
     st.session_state.reset_project_selector = False
+
+
+# ------------------ FIX: Clear Filters callback ------------------
+def reset_filters():
+    """
+    Reset filter widgets by assigning default values (more reliable than deleting keys). [1](https://jnj.sharepoint.com/teams/EthiconGACampusEngineering/_layouts/15/Doc.aspx?sourcedoc=%7BCAA20D3F-7AA8-4864-A11A-CAFAD07424C3%7D&file=XXXXXXXXX%20CSV%20for%20Monofilament%20Prolene%20Extruder%20Line6_12042025%20-%20Original.docx&action=default&mobileredirect=true&DefaultItemOpen=1)[2](https://jnj.sharepoint.com/teams/ITAS_GSD_Team/Shared%20Documents/EAS%20Team%20LTIM/Compliance/Infobelt/OAM%20User%20Guide%20-v2.pdf?web=1)
+    """
+    st.session_state["pillar_f"] = ALL_LABEL
+    st.session_state["status_f"] = ALL_LABEL
+    st.session_state["owner_f"] = ALL_LABEL
+    st.session_state["priority_f"] = ALL_LABEL
+    st.session_state["plainsware_f"] = ALL_LABEL
+    st.session_state["search_f"] = ""
+    st.toast("Cleared filters.", icon="✅")
+    st.rerun()  # rerun is the recommended way vs experimental_rerun [3](https://stackoverflow.com/questions/73049262/update-value-for-selectbox-in-streamlit-in-real-time)
 
 
 # ------------------ Project Editor ------------------
@@ -444,17 +442,13 @@ owner_list = distinct_values("owner")
 
 bcol1, bcol2 = st.columns([1, 1])
 new_clicked = bcol1.button("New", key="btn_new_project")
-clear_clicked = bcol2.button("Clear Filters", key="btn_clear_filters")
+
+# ✅ FIXED Clear Filters button
+bcol2.button("Clear Filters", key="btn_clear_filters", on_click=reset_filters)
 
 if new_clicked:
     st.session_state.reset_project_selector = True
     st.rerun()
-
-if clear_clicked:
-    for k in ["pillar_f", "status_f", "owner_f", "priority_f", "plainsware_f", "search_f"]:
-        if k in st.session_state:
-            del st.session_state[k]
-    st.toast("Cleared filters.", icon="✅")
 
 
 # ------------------ Form (Entry) ------------------
@@ -561,12 +555,11 @@ def _clean(s: Any) -> str:
 
 if submitted_new:
     errors = []
-
     project_name_clean = _clean(project_name)
     project_pillar_clean = _clean(project_pillar)
     project_owner_clean = _clean(project_owner)
     project_status_clean = _clean(project_status)
-    safe_priority = safe_int(project_priority, default=5)
+    safe_priority_val = safe_int(project_priority, default=5)
 
     if not project_name_clean:
         errors.append("Name is required.")
@@ -590,7 +583,6 @@ if submitted_new:
         try:
             ts = now_ts()
             with conn() as c:
-                # Always provide created_at/updated_at to satisfy NOT NULL constraints. [1](https://docsbot.ai/prompts/programming/streamlit-widget-order-error)[2](https://stackoverflow.com/questions/77825266/streamlit-state-management-does-not-work-for-text-input-field)
                 c.execute(
                     f"""
                     INSERT INTO {TABLE}
@@ -602,7 +594,7 @@ if submitted_new:
                     (
                         project_name_clean,
                         project_pillar_clean,
-                        safe_priority,
+                        safe_priority_val,
                         _clean(description),
                         project_owner_clean,
                         project_status_clean,
@@ -634,12 +626,11 @@ if submitted_update:
         st.warning("Select an existing project to update.")
     else:
         errors = []
-
         project_name_clean = _clean(project_name)
         project_pillar_clean = _clean(project_pillar)
         project_owner_clean = _clean(project_owner)
         project_status_clean = _clean(project_status)
-        safe_priority = safe_int(project_priority, default=5)
+        safe_priority_val = safe_int(project_priority, default=5)
 
         if not project_name_clean:
             errors.append("Name is required.")
@@ -674,7 +665,7 @@ if submitted_update:
                         (
                             project_name_clean,
                             project_pillar_clean,
-                            safe_priority,
+                            safe_priority_val,
                             _clean(description),
                             project_owner_clean,
                             project_status_clean,
