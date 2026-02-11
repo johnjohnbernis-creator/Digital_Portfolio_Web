@@ -98,8 +98,7 @@ def reset_filters():
 
     st.toast("Cleared filters.", icon="✅")
     st.session_state["_do_rerun"] = True
-``
-``
+
 # ------------------ DB / Utility Helpers ------------------
 def conn() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH, check_same_thread=False)
