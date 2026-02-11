@@ -1,11 +1,9 @@
-# Digital Portfolio — Web Version
 # --------------------------------
 import os
 import io
-import re
 import sqlite3
 from datetime import datetime, date
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import pandas as pd
 import streamlit as st
@@ -52,17 +50,8 @@ def status_to_state(x):
     return "Completed" if str(x).strip().lower() in ("done", "complete", "completed") else "Ongoing"
 
 
-def clean(s):
-    return (s or "").strip()
-
-
 # ================== DB INIT ==================
 def ensure_schema():
-    """
-    We store plainsware_number as TEXT so it can be alphanumeric (letters+numbers).
-    If an older DB has INTEGER affinity for plainsware_number, SQLite will still accept text,
-    so we keep the migration simple.
-    """
     with conn() as c:
         c.execute(
             f"""
@@ -77,7 +66,7 @@ def ensure_schema():
                 start_date TEXT,
                 due_date TEXT,
                 plainsware_project TEXT DEFAULT 'No',
-                plainsware_number TEXT,
+                plainsware_number INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -90,8 +79,8 @@ ensure_schema()
 
 
 # ================== SESSION STATE INIT ==================
-# Filters/session keys
 for key, default in {
+    "project_selector": NEW_LABEL,
     "pillar_f": ALL_LABEL,
     "status_f": ALL_LABEL,
     "owner_f": ALL_LABEL,
@@ -100,26 +89,8 @@ for key, default in {
     "search_f": "",
     "_filters_cleared": False,
 }.items():
-    st.session_state.setdefault(key, default)
-
-# Stable project selection by ID
-st.session_state.setdefault("selected_project_id", None)
-
-# Form state keys (THIS is the key fix to always load selected project)
-FORM_DEFAULTS = {
-    "form_name": "",
-    "form_pillar": "",
-    "form_priority": 5,
-    "form_description": "",
-    "form_owner": "",
-    "form_status": "",
-    "form_start_date": date.today(),
-    "form_due_date": date.today(),
-    "form_plainsware_project": "No",
-    "form_plainsware_number": "",  # alphanumeric text
-}
-for k, v in FORM_DEFAULTS.items():
-    st.session_state.setdefault(k, v)
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 
 # ================== CLEAR FILTERS CALLBACK ==================
@@ -133,14 +104,16 @@ def reset_filters():
     st.session_state._filters_cleared = True
 
 
+# ================== PAGE ==================
+st.set_page_config(page_title="Digital Portfolio", layout="wide")
+st.title("Digital Portfolio — Web Version")
+
+
 # ================== LOAD DATA ==================
 def distinct(col):
     with conn() as c:
         df = pd.read_sql_query(
-            f"SELECT DISTINCT {col} FROM {TABLE} "
-            f"WHERE {col} IS NOT NULL AND TRIM({col}) <> '' "
-            f"ORDER BY {col}",
-            c
+            f"SELECT DISTINCT {col} FROM {TABLE} WHERE {col} IS NOT NULL AND TRIM({col}) <> '' ORDER BY {col}", c
         )
     return df[col].astype(str).tolist()
 
@@ -180,76 +153,34 @@ def fetch_one(project_id: int) -> Optional[Dict[str, Any]]:
         df = pd.read_sql_query(f"SELECT * FROM {TABLE} WHERE id=?", c, params=[project_id])
     if df.empty:
         return None
-    row = df.iloc[0].to_dict()
-    # Always treat plainsware_number as string in the app
-    row["plainsware_number"] = "" if row.get("plainsware_number") is None else str(row.get("plainsware_number"))
-    return row
+    return df.iloc[0].to_dict()
 
 
-# ================== PROJECT LOADER (KEY FIX) ==================
-def load_selected_into_form():
-    """
-    When selector changes, push DB values into form_* session_state keys.
-    This forces the form to show the selected project values.
-    """
-    pid = st.session_state.selected_project_id
-
-    # New Project
-    if pid is None:
-        for k, v in FORM_DEFAULTS.items():
-            st.session_state[k] = v
-        return
-
-    row = fetch_one(int(pid))
-    if not row:
-        return
-
-    st.session_state["form_name"] = row.get("name", "") or ""
-    st.session_state["form_pillar"] = row.get("pillar", "") or ""
-    st.session_state["form_priority"] = int(row.get("priority", 5) or 5)
-    st.session_state["form_description"] = row.get("description", "") or ""
-    st.session_state["form_owner"] = row.get("owner", "") or ""
-    st.session_state["form_status"] = row.get("status", "") or ""
-    st.session_state["form_start_date"] = try_date(row.get("start_date"))
-    st.session_state["form_due_date"] = try_date(row.get("due_date"))
-    st.session_state["form_plainsware_project"] = row.get("plainsware_project", "No") or "No"
-    st.session_state["form_plainsware_number"] = str(row.get("plainsware_number", "") or "")
-
-
-# ================== PAGE ==================
-st.set_page_config(page_title="Digital Portfolio", layout="wide")
-st.title("Digital Portfolio — Web Version")
-
+# ================== PROJECT EDITOR ==================
 st.subheader("Project Editor")
 
-# Build project selector as stable IDs
 with conn() as c:
     projects = pd.read_sql_query(f"SELECT id, name FROM {TABLE} ORDER BY name", c)
 
-id_to_name = dict(zip(projects["id"], projects["name"]))
-selector_options = [None] + projects["id"].tolist()
-
-def fmt(pid):
-    return NEW_LABEL if pid is None else f"{pid} — {id_to_name.get(pid, '')}"
+options = [NEW_LABEL] + [f"{r.id} — {r.name}" for r in projects.itertuples()]
 
 colA, colB = st.columns([3, 1])
 
-colA.selectbox(
+selected = colA.selectbox(
     "Select Project to Edit",
-    selector_options,
-    format_func=fmt,
-    key="selected_project_id",
-    on_change=load_selected_into_form,
+    options,
+    key="project_selector",
 )
 
 colB.button("Clear Filters", on_click=reset_filters)
 
-# Ensure the form matches the selection on first render
-if "_loaded_once" not in st.session_state:
-    load_selected_into_form()
-    st.session_state["_loaded_once"] = True
-
-loaded = fetch_one(int(st.session_state.selected_project_id)) if st.session_state.selected_project_id else None
+loaded = None
+if selected != NEW_LABEL:
+    try:
+        pid = int(selected.split(" — ", 1)[0])
+        loaded = fetch_one(pid)
+    except Exception:
+        loaded = None
 
 
 # ================== EDIT FORM ==================
@@ -257,45 +188,62 @@ st.markdown("---")
 with st.form("project_form"):
     c1, c2 = st.columns(2)
 
+    # Defaults (from selected row)
+    name_val = (loaded or {}).get("name", "")
+    pillar_val = (loaded or {}).get("pillar", "")
+    priority_val = int((loaded or {}).get("priority", 5) or 5)
+    owner_val = (loaded or {}).get("owner", "")
+    status_val = (loaded or {}).get("status", "")
+    desc_val = (loaded or {}).get("description", "")
+
+    start_val = try_date((loaded or {}).get("start_date"))
+    due_val = try_date((loaded or {}).get("due_date"))
+
+    pw_val = (loaded or {}).get("plainsware_project", "No") or "No"
+    pw_num_val = (loaded or {}).get("plainsware_number", None)
+
     with c1:
-        st.text_input("Name*", key="form_name")
-
-        # Make sure current value is included even if not in distinct list
-        pillar_options = sorted(set(distinct("pillar") + ([st.session_state["form_pillar"]] if st.session_state["form_pillar"] else [])))
-        if not pillar_options:
-            pillar_options = [""]
-
-        st.selectbox("Pillar*", options=pillar_options, key="form_pillar")
-
-        st.number_input("Priority", min_value=1, max_value=99, step=1, format="%d", key="form_priority")
-        st.text_area("Description", height=120, key="form_description")
+        project_name = st.text_input("Name*", value=name_val)
+        pillar_options = distinct("pillar")
+        project_pillar = st.selectbox("Pillar*", options=(pillar_options or [""]), index=(pillar_options.index(pillar_val) if pillar_val in pillar_options else 0))
+        project_priority = st.number_input("Priority", min_value=1, max_value=99, value=int(priority_val), step=1, format="%d")
+        description = st.text_area("Description", value=desc_val, height=120)
 
     with c2:
-        owner_options = sorted(set(distinct("owner") + ([st.session_state["form_owner"]] if st.session_state["form_owner"] else [])))
-        if not owner_options:
-            owner_options = [""]
+        owner_options = distinct("owner")
+        project_owner = st.selectbox("Owner*", options=(owner_options or [""]), index=(owner_options.index(owner_val) if owner_val in owner_options else 0))
 
-        st.selectbox("Owner*", options=owner_options, key="form_owner")
+        status_options = [""] + distinct("status")
+        project_status = st.selectbox("Status", status_options, index=(status_options.index(status_val) if status_val in status_options else 0))
 
-        status_options = [""] + sorted(set(distinct("status") + ([st.session_state["form_status"]] if st.session_state["form_status"] else [])))
-        st.selectbox("Status", options=status_options, key="form_status")
-
-        st.date_input("Start Date", key="form_start_date")
-        st.date_input("Due Date", key="form_due_date")
+        start_date = st.date_input("Start Date", value=start_val)
+        due_date = st.date_input("Due Date", value=due_val)
 
         # ✅ Plainsware selector
-        st.selectbox("Plainsware Project?", ["No", "Yes"], key="form_plainsware_project")
+        plainsware_project = st.selectbox(
+            "Plainsware Project?",
+            ["No", "Yes"],
+            index=1 if str(pw_val).strip() == "Yes" else 0,
+        )
 
-        # ✅ REQUIRED alphanumeric when Yes
-        if st.session_state["form_plainsware_project"] == "Yes":
-            st.text_input(
+        # ✅ REQUIRED number when Yes
+        plainsware_number = None
+        if plainsware_project == "Yes":
+            default_num = 1
+            try:
+                if pw_num_val is not None and str(pw_num_val).strip().isdigit():
+                    default_num = int(pw_num_val)
+            except Exception:
+                pass
+
+            plainsware_number = st.number_input(
                 "Plainsware Project Number*",
-                key="form_plainsware_number",
-                help="Letters + numbers only, no spaces. Example: PW123A"
+                min_value=1,
+                step=1,
+                value=default_num,
+                format="%d",
             )
             st.caption("Required when Plainsware Project is Yes.")
-        else:
-            st.session_state["form_plainsware_number"] = ""
 
     b1, b2, b3 = st.columns(3)
     save_new = b1.form_submit_button("Save New")
@@ -304,21 +252,27 @@ with st.form("project_form"):
 
 
 # ================== VALIDATION + CRUD ==================
+def clean(s):
+    return (s or "").strip()
+
+
 def validate_common():
     errors = []
-    if not clean(st.session_state["form_name"]):
+    if not clean(project_name):
         errors.append("Name is required.")
-    if not clean(st.session_state["form_pillar"]):
+    if not clean(project_pillar):
         errors.append("Pillar is required.")
-    if not clean(st.session_state["form_owner"]):
+    if not clean(project_owner):
         errors.append("Owner is required.")
 
-    if st.session_state["form_plainsware_project"] == "Yes":
-        v = clean(st.session_state["form_plainsware_number"])
-        if not v:
+    # ✅ NEW rule: if Plainsware Yes -> number required
+    if plainsware_project == "Yes":
+        if plainsware_number is None:
             errors.append("Plainsware Project Number is required when Plainsware Project is Yes.")
-        elif not re.fullmatch(r"[A-Za-z0-9]+", v):
-            errors.append("Plainsware Project Number must contain ONLY letters and numbers (no spaces).")
+        else:
+            n = safe_int(plainsware_number, default=0)
+            if n <= 0:
+                errors.append("Plainsware Project Number must be a positive integer.")
 
     return errors
 
@@ -328,9 +282,8 @@ if save_new:
     if errs:
         st.error(" ".join(errs))
     else:
-        pw_number_db = clean(st.session_state["form_plainsware_number"]) if st.session_state["form_plainsware_project"] == "Yes" else None
+        pw_number_db = safe_int(plainsware_number, default=0) if plainsware_project == "Yes" else None
         ts = now_ts()
-
         with conn() as c:
             c.execute(
                 f"""
@@ -341,29 +294,22 @@ if save_new:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    clean(st.session_state["form_name"]),
-                    clean(st.session_state["form_pillar"]),
-                    safe_int(st.session_state["form_priority"], 5),
-                    clean(st.session_state["form_description"]),
-                    clean(st.session_state["form_owner"]),
-                    clean(st.session_state["form_status"]),
-                    to_iso(st.session_state["form_start_date"]),
-                    to_iso(st.session_state["form_due_date"]),
-                    st.session_state["form_plainsware_project"],
+                    clean(project_name),
+                    clean(project_pillar),
+                    safe_int(project_priority, 5),
+                    clean(description),
+                    clean(project_owner),
+                    clean(project_status),
+                    to_iso(start_date),
+                    to_iso(due_date),
+                    plainsware_project,
                     pw_number_db,
                     ts,
                     ts,
                 ),
             )
             c.commit()
-
-            new_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-        # Select new project and reload
-        st.session_state.selected_project_id = int(new_id)
-        load_selected_into_form()
         st.success("✅ Project created!")
-        st.rerun()
 
 
 if update:
@@ -374,9 +320,8 @@ if update:
         if errs:
             st.error(" ".join(errs))
         else:
-            pw_number_db = clean(st.session_state["form_plainsware_number"]) if st.session_state["form_plainsware_project"] == "Yes" else None
+            pw_number_db = safe_int(plainsware_number, default=0) if plainsware_project == "Yes" else None
             ts = now_ts()
-
             with conn() as c:
                 c.execute(
                     f"""
@@ -387,25 +332,22 @@ if update:
                     WHERE id=?
                     """,
                     (
-                        clean(st.session_state["form_name"]),
-                        clean(st.session_state["form_pillar"]),
-                        safe_int(st.session_state["form_priority"], 5),
-                        clean(st.session_state["form_description"]),
-                        clean(st.session_state["form_owner"]),
-                        clean(st.session_state["form_status"]),
-                        to_iso(st.session_state["form_start_date"]),
-                        to_iso(st.session_state["form_due_date"]),
-                        st.session_state["form_plainsware_project"],
+                        clean(project_name),
+                        clean(project_pillar),
+                        safe_int(project_priority, 5),
+                        clean(description),
+                        clean(project_owner),
+                        clean(project_status),
+                        to_iso(start_date),
+                        to_iso(due_date),
+                        plainsware_project,
                         pw_number_db,
                         ts,
                         int(loaded["id"]),
                     ),
                 )
                 c.commit()
-
-            load_selected_into_form()
             st.success("✅ Project updated!")
-            st.rerun()
 
 
 if delete:
@@ -415,12 +357,7 @@ if delete:
         with conn() as c:
             c.execute(f"DELETE FROM {TABLE} WHERE id=?", (int(loaded["id"]),))
             c.commit()
-
-        # Go back to new project
-        st.session_state.selected_project_id = None
-        load_selected_into_form()
         st.warning("Project deleted.")
-        st.rerun()
 
 
 # ================== FILTERS ==================
