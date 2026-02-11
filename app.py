@@ -59,7 +59,39 @@ EXPECTED_COLUMNS = {
     "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
 }
 
+# ------------------ Callbacks ------------------
 
+def new_project():
+    # Select "New Project"
+    st.session_state["project_selector"] = NEW_LABEL
+
+    # Clear editor widgets
+    for k in [
+        "editor_name", "editor_pillar", "editor_priority", "editor_desc",
+        "editor_owner", "editor_status", "editor_start", "editor_due",
+        "editor_plainsware_project", "editor_plainsware_number",
+    ]:
+        st.session_state.pop(k, None)
+
+    st.toast("New project ready.", icon="🆕")
+
+    # Request rerun (handled later)
+    st.session_state["_do_rerun"] = True
+
+
+def reset_filters():
+    st.session_state["pillar_f"] = ALL_LABEL
+    st.session_state["status_f"] = ALL_LABEL
+    st.session_state["owner_f"] = ALL_LABEL
+    st.session_state["priority_f"] = ALL_LABEL
+    st.session_state["plainsware_f"] = ALL_LABEL
+    st.session_state["search_f"] = ""
+
+    st.toast("Cleared filters.", icon="✅")
+
+    # Request rerun (handled later)
+    st.session_state["_do_rerun"] = True
+``
 # ------------------ DB / Utility Helpers ------------------
 def conn() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH, check_same_thread=False)
