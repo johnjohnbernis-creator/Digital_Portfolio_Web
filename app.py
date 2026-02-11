@@ -61,11 +61,22 @@ EXPECTED_COLUMNS = {
 
 # ------------------ Callbacks ------------------
 
+# ------------------ Constants ------------------
+DB_PATH = "portfolio.db"
+TABLE = "projects"
+NEW_LABEL = "<New Project>"
+ALL_LABEL = "All"
+
+
+def now_ts() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ------------------ Callbacks (✅ PUT HERE) ------------------
+
 def new_project():
-    # Select "New Project"
     st.session_state["project_selector"] = NEW_LABEL
 
-    # Clear editor widgets
     for k in [
         "editor_name", "editor_pillar", "editor_priority", "editor_desc",
         "editor_owner", "editor_status", "editor_start", "editor_due",
@@ -74,8 +85,6 @@ def new_project():
         st.session_state.pop(k, None)
 
     st.toast("New project ready.", icon="🆕")
-
-    # Request rerun (handled later)
     st.session_state["_do_rerun"] = True
 
 
@@ -88,9 +97,8 @@ def reset_filters():
     st.session_state["search_f"] = ""
 
     st.toast("Cleared filters.", icon="✅")
-
-    # Request rerun (handled later)
     st.session_state["_do_rerun"] = True
+``
 ``
 # ------------------ DB / Utility Helpers ------------------
 def conn() -> sqlite3.Connection:
