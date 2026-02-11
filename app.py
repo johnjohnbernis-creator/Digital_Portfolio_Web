@@ -45,6 +45,10 @@ EXPECTED_COLUMNS = {
     "status": "TEXT",
     "start_date": "TEXT",
     "due_date": "TEXT",
+
+    # NEW FIELDS:
+    "plainsware_project": "TEXT DEFAULT 'No'",   # 'Yes'/'No'
+    "plainsware_number": "INTEGER",             # optional, only if plainsware_project == 'Yes'
 }
 
 
@@ -77,7 +81,9 @@ def ensure_schema_and_migrate() -> None:
                 owner TEXT,
                 status TEXT,
                 start_date TEXT,
-                due_date TEXT
+                due_date TEXT,
+                plainsware_project TEXT DEFAULT 'No',
+                plainsware_number INTEGER
             )
             """
         )
@@ -132,7 +138,9 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
             owner TEXT,
             status TEXT,
             start_date TEXT,
-            due_date TEXT
+            due_date TEXT,
+            plainsware_project TEXT DEFAULT 'No',
+            plainsware_number INTEGER
         )
         """
     )
@@ -258,7 +266,10 @@ def build_pdf_report(df: pd.DataFrame, title: str = "Digital Portfolio Report") 
     c.drawString(40, height - 65, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     c.drawString(40, height - 80, f"Rows: {len(df)}")
 
-    cols = ["id", "name", "pillar", "priority", "owner", "status", "start_date", "due_date"]
+    cols = [
+        "id", "name", "pillar", "priority", "owner", "status", "start_date", "due_date",
+        "plainsware_project", "plainsware_number"
+    ]
     cols = [col for col in cols if col in df.columns]
 
     y = height - 110
@@ -289,20 +300,32 @@ st.title("Digital Portfolio — Web Version")
 
 ensure_schema_and_migrate()
 
-with st.expander("🔧 Debug: Database schema", expanded=False):
-    st.dataframe(table_info(TABLE), use_container_width=True)
+# Hide schema by default; show only via sidebar toggle
+if st.sidebar.checkbox("Show debug tools", value=False):
+    with st.expander("🔧 Debug: Database schema", expanded=False):
+        st.dataframe(table_info(TABLE), use_container_width=True)
 
 if not os.path.exists(DB_PATH):
     st.error("Database not found.")
     st.stop()
 
 
+# ------------------ Session State (RESET FIX) ------------------
+# IMPORTANT: apply reset BEFORE widget instantiation (prevents StreamlitAPIException)
+if "project_selector" not in st.session_state:
+    st.session_state.project_selector = NEW_LABEL
+
+if "reset_project_selector" not in st.session_state:
+    st.session_state.reset_project_selector = False
+
+if st.session_state.reset_project_selector:
+    st.session_state.project_selector = NEW_LABEL
+    st.session_state.reset_project_selector = False
+
+
 # ------------------ Project Editor ------------------
 st.markdown("---")
 st.subheader("Project Editor")
-
-if "project_selector" not in st.session_state:
-    st.session_state.project_selector = NEW_LABEL
 
 with conn() as c:
     df_projects = pd.read_sql_query(f"SELECT id, name FROM {TABLE} ORDER BY name", c)
@@ -330,14 +353,15 @@ if selected_project != NEW_LABEL:
 
 pillar_list = distinct_values("pillar")
 status_list = distinct_values("status")
-owner_list  = distinct_values("owner")
+owner_list = distinct_values("owner")
 
 bcol1, bcol2 = st.columns([1, 1])
 new_clicked = bcol1.button("New", key="btn_new_project")
 clear_clicked = bcol2.button("Clear Filters", key="btn_clear_filters")
 
 if new_clicked:
-    st.session_state.project_selector = NEW_LABEL
+    # Use reset flag (safe) instead of assigning project_selector after widget exists
+    st.session_state.reset_project_selector = True
     st.rerun()
 
 if clear_clicked:
@@ -360,11 +384,14 @@ with st.form("project_form"):
     due_val = try_date(loaded_project.get("due_date")) if loaded_project else date.today()
     desc_val = loaded_project.get("description") if loaded_project else ""
 
+    # NEW: Plainsware defaults
+    plainsware_val = loaded_project.get("plainsware_project", "No") if loaded_project else "No"
+    plainsware_num_val = loaded_project.get("plainsware_number") if loaded_project else None
+
     # LEFT
     with c1:
         project_name = st.text_input("Name*", value=name_val, key="editor_name")
 
-        # Pillar: select OR type new value (single widget)  [1](https://issues.chromium.org/issues/40896385)[2](https://pypi.org/project/kaleido/)
         pillar_options = pillar_list[:] if pillar_list else [""]
         pillar_index = pillar_options.index(pillar_val) if pillar_val in pillar_options else None
         project_pillar = st.selectbox(
@@ -409,7 +436,34 @@ with st.form("project_form"):
         )
 
         start_date = st.date_input("Start Date", value=start_val, key="editor_start")
-        due_date   = st.date_input("Due Date", value=due_val, key="editor_due")
+        due_date = st.date_input("Due Date", value=due_val, key="editor_due")
+
+        # NEW: Plainsware fields
+        plainsware_project = st.selectbox(
+            "Plainsware Project?",
+            ["No", "Yes"],
+            index=1 if str(plainsware_val).strip() == "Yes" else 0,
+            key="editor_plainsware_project",
+        )
+
+        plainsware_number = None
+        if plainsware_project == "Yes":
+            # Require a number when Yes
+            default_num = 1
+            try:
+                if plainsware_num_val is not None and str(plainsware_num_val).strip().isdigit():
+                    default_num = int(plainsware_num_val)
+            except Exception:
+                pass
+
+            plainsware_number = st.number_input(
+                "Plainsware Project Number",
+                min_value=1,
+                step=1,
+                value=default_num,
+                format="%d",
+                key="editor_plainsware_number",
+            )
 
     col_a, col_b, col_c = st.columns(3)
     submitted_new = col_a.form_submit_button("Save New")
@@ -420,6 +474,7 @@ with st.form("project_form"):
 # ------------------ CRUD Actions (outside form) ------------------
 def _clean(s: Any) -> str:
     return (s or "").strip()
+
 
 if submitted_new:
     errors = []
@@ -437,6 +492,16 @@ if submitted_new:
     if not project_owner_clean:
         errors.append("Owner is required.")
 
+    # NEW validation: if Plainsware Yes, require number
+    pw_number_db = None
+    if plainsware_project == "Yes":
+        if plainsware_number is None:
+            errors.append("Plainsware Project Number is required when Plainsware Project is Yes.")
+        else:
+            pw_number_db = safe_int(plainsware_number, default=0)
+            if pw_number_db <= 0:
+                errors.append("Plainsware Project Number must be a positive integer.")
+
     if errors:
         st.error(" ".join(errors))
     else:
@@ -445,8 +510,9 @@ if submitted_new:
                 c.execute(
                     f"""
                     INSERT INTO {TABLE}
-                    (name, pillar, priority, description, owner, status, start_date, due_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (name, pillar, priority, description, owner, status, start_date, due_date,
+                     plainsware_project, plainsware_number)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         project_name_clean,
@@ -457,13 +523,15 @@ if submitted_new:
                         project_status_clean,
                         to_iso(start_date),
                         to_iso(due_date),
+                        plainsware_project,
+                        pw_number_db,
                     ),
                 )
                 c.commit()
 
             clear_cached_lists()
             st.success("✅ Project created successfully!")
-            st.session_state.project_selector = NEW_LABEL
+            st.session_state.reset_project_selector = True
             st.rerun()
 
         except sqlite3.IntegrityError as e:
@@ -472,6 +540,7 @@ if submitted_new:
         except Exception as e:
             st.error(f"Unexpected save error: {e}")
             st.stop()
+
 
 if submitted_update:
     if not loaded_project:
@@ -492,6 +561,16 @@ if submitted_update:
         if not project_owner_clean:
             errors.append("Owner is required.")
 
+        # NEW validation: if Plainsware Yes, require number
+        pw_number_db = None
+        if plainsware_project == "Yes":
+            if plainsware_number is None:
+                errors.append("Plainsware Project Number is required when Plainsware Project is Yes.")
+            else:
+                pw_number_db = safe_int(plainsware_number, default=0)
+                if pw_number_db <= 0:
+                    errors.append("Plainsware Project Number must be a positive integer.")
+
         if errors:
             st.error(" ".join(errors))
         else:
@@ -500,7 +579,8 @@ if submitted_update:
                     c.execute(
                         f"""
                         UPDATE {TABLE}
-                        SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?
+                        SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?,
+                            plainsware_project=?, plainsware_number=?
                         WHERE id=?
                         """,
                         (
@@ -512,6 +592,8 @@ if submitted_update:
                             project_status_clean,
                             to_iso(start_date),
                             to_iso(due_date),
+                            plainsware_project,
+                            pw_number_db,
                             int(loaded_project["id"]),
                         ),
                     )
@@ -525,6 +607,7 @@ if submitted_update:
                 st.error(f"SQLite IntegrityError: {e}")
                 st.stop()
 
+
 if submitted_delete:
     if not loaded_project:
         st.warning("Select an existing project to delete.")
@@ -536,7 +619,7 @@ if submitted_delete:
 
             clear_cached_lists()
             st.warning("Project deleted.")
-            st.session_state.project_selector = NEW_LABEL
+            st.session_state.reset_project_selector = True
             st.rerun()
 
         except sqlite3.IntegrityError as e:
@@ -683,7 +766,6 @@ if show_table:
     st.dataframe(data, use_container_width=True)
 
 # ------------------ Export Options (outside form) ------------------
-# download_button cannot be used in st.form [3](https://plotly.com/python-api-reference/generated/plotly.io.write_image.html)[4](https://github.com/streamlit/streamlit/issues/4947)
 st.markdown("---")
 st.subheader("Export Options")
 
@@ -738,3 +820,4 @@ if roadmap_fig is not None:
             )
         except Exception as e:
             st.info(f"PNG export unavailable in this runtime: {e}")
+``
