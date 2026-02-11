@@ -1,59 +1,98 @@
-# Digital Portfolio — Web Version
-# --------------------------------
+# Digital Portfolio — Web HMI + Report & Roadmap (Streamlit)
+# ----------------------------------------------------------
 import os
 import io
 import sqlite3
 from datetime import datetime, date
-from typing import Optional, Dict, Any, List
+from typing import List, Dict, Optional, Any
 
 import pandas as pd
-import streamlit as st
 import plotly.express as px
+import plotly.io as pio
+import streamlit as st
 
 
-# ================== CONSTANTS ==================
+# ------------------ Optional dependencies ------------------
+# PDF (ReportLab)
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+    REPORTLAB_AVAILABLE = True
+except Exception:
+    REPORTLAB_AVAILABLE = False
+
+# Plotly static image export (Kaleido + Chrome typically required)
+try:
+    import kaleido  # noqa: F401
+    KALEIDO_AVAILABLE = True
+except Exception:
+    KALEIDO_AVAILABLE = False
+
+
+# ------------------ Constants ------------------
 DB_PATH = "portfolio.db"
 TABLE = "projects"
 NEW_LABEL = "<New Project>"
 ALL_LABEL = "All"
 
 
-# ================== HELPERS ==================
-def now_ts():
+def now_ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def conn():
+EXPECTED_COLUMNS = {
+    "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
+    "name": "TEXT NOT NULL",
+    "pillar": "TEXT NOT NULL",
+    "priority": "INTEGER DEFAULT 5",
+    "description": "TEXT",
+    "owner": "TEXT",
+    "status": "TEXT",
+    "start_date": "TEXT",
+    "due_date": "TEXT",
+
+    # Plainsware
+    "plainsware_project": "TEXT DEFAULT 'No'",
+    "plainsware_number": "INTEGER",
+
+    # Timestamps
+    "created_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+}
+
+
+# ------------------ DB / Utility Helpers ------------------
+def conn() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
-def to_iso(d: Optional[date]) -> str:
-    return d.strftime("%Y-%m-%d") if d else ""
+def _table_info_df(c: sqlite3.Connection) -> pd.DataFrame:
+    return pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
 
 
-def try_date(s):
-    if not s:
-        return date.today()
-    try:
-        return datetime.strptime(str(s), "%Y-%m-%d").date()
-    except Exception:
-        return date.today()
+def _needs_rebuild_due_to_created_at(info: pd.DataFrame) -> bool:
+    """Rebuild if created_at exists and is NOT NULL but has no default."""
+    if info.empty:
+        return False
+    row = info[info["name"] == "created_at"]
+    if row.empty:
+        return False
+    notnull = int(row.iloc[0]["notnull"]) == 1
+    dflt = row.iloc[0]["dflt_value"]
+    no_default = pd.isna(dflt) or str(dflt).strip() == ""
+    return bool(notnull and no_default)
 
 
-def safe_int(x, default=5):
-    try:
-        return int(x)
-    except Exception:
-        return default
-
-
-def status_to_state(x):
-    return "Completed" if str(x).strip().lower() in ("done", "complete", "completed") else "Ongoing"
-
-
-# ================== DB INIT ==================
-def ensure_schema():
+def ensure_schema_and_migrate() -> None:
+    """
+    Ensure the projects table exists and includes required columns.
+    - Creates table if missing
+    - Renames legacy typo columns (plainsware_proj -> plainsware_project; plainsware_num -> plainsware_number)
+    - Detects NOT NULL columns w/ no default (esp. created_at) and rebuilds table
+    - Adds missing columns via ALTER TABLE ADD COLUMN
+    """
     with conn() as c:
+        # Base create
         c.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -68,166 +107,423 @@ def ensure_schema():
                 due_date TEXT,
                 plainsware_project TEXT DEFAULT 'No',
                 plainsware_number INTEGER,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
         c.commit()
 
+        info = _table_info_df(c)
+        existing_set = set(info["name"].tolist())
 
-ensure_schema()
+        # Rename legacy typo columns if present (fallback to rebuild on failure)
+        if "plainsware_proj" in existing_set and "plainsware_project" not in existing_set:
+            try:
+                c.execute(f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_proj" TO "plainsware_project"')
+                c.commit()
+            except Exception:
+                _rebuild_projects_table(c)
+
+        if "plainsware_num" in existing_set and "plainsware_number" not in existing_set:
+            try:
+                c.execute(f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_num" TO "plainsware_number"')
+                c.commit()
+            except Exception:
+                _rebuild_projects_table(c)
+
+        # Refresh
+        info = _table_info_df(c)
+        existing_set = set(info["name"].tolist())
+
+        # If created_at is NOT NULL and has no default, rebuild
+        if _needs_rebuild_due_to_created_at(info):
+            _rebuild_projects_table(c)
+            info = _table_info_df(c)
+            existing_set = set(info["name"].tolist())
+
+        # If there are ANY extra NOT NULL columns w/ no default (can break inserts), rebuild
+        extra_notnull = info[
+            (~info["name"].isin(EXPECTED_COLUMNS.keys()))
+            & (info["notnull"] == 1)
+            & (info["dflt_value"].isna())
+        ]
+        if not extra_notnull.empty:
+            _rebuild_projects_table(c)
+            info = _table_info_df(c)
+            existing_set = set(info["name"].tolist())
+
+        # Add missing columns
+        for col, ddl in EXPECTED_COLUMNS.items():
+            if col not in existing_set:
+                if col in ("id", "name", "pillar"):
+                    continue
+                try:
+                    c.execute(f"ALTER TABLE {TABLE} ADD COLUMN {col} {ddl}")
+                except Exception:
+                    _rebuild_projects_table(c)
+                    break
+
+        c.commit()
 
 
-# ================== SESSION STATE INIT ==================
-for key, default in {
-    "project_selector": NEW_LABEL,
-    "pillar_f": ALL_LABEL,
-    "status_f": ALL_LABEL,
-    "owner_f": ALL_LABEL,
-    "priority_f": ALL_LABEL,
-    "plainsware_f": ALL_LABEL,
-    "search_f": "",
-    "_filters_cleared": False,
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = default
+def _rebuild_projects_table(c: sqlite3.Connection) -> None:
+    """Rebuild projects table to match expected schema, copying intersecting columns."""
+    old_info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
+    old_cols = old_info["name"].tolist()
+
+    legacy_map = {
+        "plainsware_proj": "plainsware_project",
+        "plainsware_num": "plainsware_number",
+    }
+
+    keep_old = []
+    keep_new = []
+    for col in old_cols:
+        if col == "id":
+            continue
+        if col in EXPECTED_COLUMNS:
+            keep_old.append(col)
+            keep_new.append(col)
+        elif col in legacy_map and legacy_map[col] in EXPECTED_COLUMNS:
+            keep_old.append(col)
+            keep_new.append(legacy_map[col])
+
+    c.execute("BEGIN")
+    c.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TABLE}__new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            pillar TEXT NOT NULL,
+            priority INTEGER DEFAULT 5,
+            description TEXT,
+            owner TEXT,
+            status TEXT,
+            start_date TEXT,
+            due_date TEXT,
+            plainsware_project TEXT DEFAULT 'No',
+            plainsware_number INTEGER,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    if keep_old:
+        src = ", ".join(keep_old)
+        dst = ", ".join(keep_new)
+        c.execute(
+            f"""
+            INSERT INTO {TABLE}__new ({dst})
+            SELECT {src} FROM {TABLE}
+            """
+        )
+
+    # Ensure timestamps are not null
+    c.execute(f"UPDATE {TABLE}__new SET created_at = COALESCE(NULLIF(created_at,''), CURRENT_TIMESTAMP)")
+    c.execute(f"UPDATE {TABLE}__new SET updated_at = COALESCE(NULLIF(updated_at,''), CURRENT_TIMESTAMP)")
+
+    c.execute(f"DROP TABLE {TABLE}")
+    c.execute(f"ALTER TABLE {TABLE}__new RENAME TO {TABLE}")
+    c.execute("COMMIT")
 
 
-# ================== CLEAR FILTERS CALLBACK ==================
-def reset_filters():
-    st.session_state.pillar_f = ALL_LABEL
-    st.session_state.status_f = ALL_LABEL
-    st.session_state.owner_f = ALL_LABEL
-    st.session_state.priority_f = ALL_LABEL
-    st.session_state.plainsware_f = ALL_LABEL
-    st.session_state.search_f = ""
-    st.session_state._filters_cleared = True
+def to_iso(d: Optional[date]) -> str:
+    return d.strftime("%Y-%m-%d") if d else ""
 
 
-# ================== PAGE ==================
-st.set_page_config(page_title="Digital Portfolio", layout="wide")
-st.title("Digital Portfolio — Web Version")
+def try_date(s: Optional[str]) -> Optional[date]:
+    if not s:
+        return None
+    try:
+        return datetime.strptime(str(s), "%Y-%m-%d").date()
+    except Exception:
+        return None
 
 
-# ================== LOAD DATA ==================
-def distinct(col):
+def safe_index(options: List[str], val: Optional[str], default: int = 0) -> int:
+    try:
+        if val in options:
+            return options.index(val)
+    except Exception:
+        pass
+    return default
+
+
+@st.cache_data(show_spinner=False)
+def distinct_values(col: str) -> List[str]:
     with conn() as c:
         df = pd.read_sql_query(
-            f"SELECT DISTINCT {col} FROM {TABLE} WHERE {col} IS NOT NULL AND TRIM({col}) <> '' ORDER BY {col}", c
+            f"""
+            SELECT DISTINCT {col}
+            FROM {TABLE}
+            WHERE {col} IS NOT NULL AND TRIM({col}) <> ''
+            ORDER BY {col}
+            """,
+            c,
         )
-    return df[col].astype(str).tolist()
+    return df[col].dropna().astype(str).tolist()
 
 
-def fetch_data(filters: Dict[str, Any]):
+def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
     q = f"SELECT * FROM {TABLE}"
-    where, args = [], []
+    args, where = [], []
 
-    for col in ["pillar", "status", "owner"]:
-        v = filters.get(col)
-        if v and v != ALL_LABEL:
-            where.append(f"{col}=?")
-            args.append(v)
+    if filters:
+        for col in ["pillar", "status", "owner"]:
+            if filters.get(col) and filters[col] != ALL_LABEL:
+                where.append(f"{col} = ?")
+                args.append(filters[col])
 
-    if filters.get("priority") != ALL_LABEL:
-        where.append("priority=?")
-        args.append(int(filters["priority"]))
+        # Plainsware filter (All/Yes/No)
+        if filters.get("plainsware") and filters["plainsware"] != ALL_LABEL:
+            where.append("plainsware_project = ?")
+            args.append(filters["plainsware"])
 
-    if filters.get("plainsware") != ALL_LABEL:
-        where.append("plainsware_project=?")
-        args.append(filters["plainsware"])
+        if filters.get("priority") and filters["priority"] != ALL_LABEL:
+            where.append("priority = ?")
+            try:
+                args.append(int(filters["priority"]))
+            except Exception:
+                where.pop()
 
-    if filters.get("search"):
-        where.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
-        s = f"%{filters['search'].lower()}%"
-        args += [s, s]
+        if filters.get("search"):
+            s = f"%{filters['search'].lower()}%"
+            where.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
+            args.extend([s, s])
 
     if where:
         q += " WHERE " + " AND ".join(where)
+
+    q += " ORDER BY COALESCE(start_date,''), COALESCE(due_date,''), COALESCE(created_at,'')"
 
     with conn() as c:
         return pd.read_sql_query(q, c, params=args)
 
 
-def fetch_one(project_id: int) -> Optional[Dict[str, Any]]:
+def fetch_all_projects() -> pd.DataFrame:
     with conn() as c:
-        df = pd.read_sql_query(f"SELECT * FROM {TABLE} WHERE id=?", c, params=[project_id])
-    if df.empty:
-        return None
-    return df.iloc[0].to_dict()
+        return pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY id", c)
 
 
-# ================== PROJECT EDITOR ==================
+def status_to_state(x: Any) -> str:
+    s = str(x).strip().lower()
+    return "Completed" if s in {"done", "complete", "completed"} else "Ongoing"
+
+
+def safe_int(x: Any, default: int = 5) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+
+def clear_cached_lists() -> None:
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+
+
+def build_pdf_report(df: pd.DataFrame, title: str = "Digital Portfolio Report") -> bytes:
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("reportlab not installed")
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(40, height - 45, title)
+
+    c.setFont("Helvetica", 10)
+    c.drawString(40, height - 65, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    c.drawString(40, height - 80, f"Rows: {len(df)}")
+
+    cols = [
+        "id", "name", "pillar", "priority", "owner", "status",
+        "start_date", "due_date",
+        "plainsware_project", "plainsware_number",
+        "created_at", "updated_at",
+    ]
+    cols = [col for col in cols if col in df.columns]
+
+    y = height - 110
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(40, y, " | ".join(cols))
+    y -= 14
+
+    c.setFont("Helvetica", 8)
+    preview = df[cols].fillna("").head(40)
+    for _, row in preview.iterrows():
+        line = " | ".join(str(row[col])[:28] for col in cols)
+        c.drawString(40, y, line)
+        y -= 10
+        if y < 50:
+            c.showPage()
+            y = height - 50
+            c.setFont("Helvetica", 8)
+
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf.read()
+
+
+# ------------------ App Boot ------------------
+st.set_page_config(page_title="Digital Portfolio", layout="wide")
+st.title("Digital Portfolio — Web Version")
+
+ensure_schema_and_migrate()
+
+if not os.path.exists(DB_PATH):
+    st.error("Database not found.")
+    st.stop()
+
+
+# ------------------ Session State (safe reset pattern) ------------------
+# Streamlit disallows setting st.session_state[key] after the widget is created. [2](https://jnj.sharepoint.com/teams/ITAS_GSD_Team/Shared%20Documents/EAS%20Team%20LTIM/Compliance/Infobelt/OAM%20User%20Guide%20-v2.pdf?web=1)
+if "project_selector" not in st.session_state:
+    st.session_state.project_selector = NEW_LABEL
+if "reset_project_selector" not in st.session_state:
+    st.session_state.reset_project_selector = False
+if st.session_state.reset_project_selector:
+    st.session_state.project_selector = NEW_LABEL
+    st.session_state.reset_project_selector = False
+
+
+# ------------------ FIX: Clear Filters callback ------------------
+def reset_filters():
+    """
+    Reset filter widgets by assigning default values (more reliable than deleting keys). [1](https://jnj.sharepoint.com/teams/EthiconGACampusEngineering/_layouts/15/Doc.aspx?sourcedoc=%7BCAA20D3F-7AA8-4864-A11A-CAFAD07424C3%7D&file=XXXXXXXXX%20CSV%20for%20Monofilament%20Prolene%20Extruder%20Line6_12042025%20-%20Original.docx&action=default&mobileredirect=true&DefaultItemOpen=1)[2](https://jnj.sharepoint.com/teams/ITAS_GSD_Team/Shared%20Documents/EAS%20Team%20LTIM/Compliance/Infobelt/OAM%20User%20Guide%20-v2.pdf?web=1)
+    """
+    st.session_state["pillar_f"] = ALL_LABEL
+    st.session_state["status_f"] = ALL_LABEL
+    st.session_state["owner_f"] = ALL_LABEL
+    st.session_state["priority_f"] = ALL_LABEL
+    st.session_state["plainsware_f"] = ALL_LABEL
+    st.session_state["search_f"] = ""
+    st.toast("Cleared filters.", icon="✅")
+    st.rerun()  # rerun is the recommended way vs experimental_rerun [3](https://stackoverflow.com/questions/73049262/update-value-for-selectbox-in-streamlit-in-real-time)
+
+
+# ------------------ Project Editor ------------------
+st.markdown("---")
 st.subheader("Project Editor")
 
 with conn() as c:
-    projects = pd.read_sql_query(f"SELECT id, name FROM {TABLE} ORDER BY name", c)
+    df_projects = pd.read_sql_query(f"SELECT id, name FROM {TABLE} ORDER BY name", c)
 
-options = [NEW_LABEL] + [f"{r.id} — {r.name}" for r in projects.itertuples()]
+project_options = [NEW_LABEL] + [
+    f"{row['id']} — {row['name']}" for _, row in df_projects.iterrows()
+]
 
-colA, colB = st.columns([3, 1])
-
-selected = colA.selectbox(
+selected_project = st.selectbox(
     "Select Project to Edit",
-    options,
+    project_options,
+    index=safe_index(project_options, st.session_state.project_selector),
     key="project_selector",
 )
 
-colB.button("Clear Filters", on_click=reset_filters)
-
-loaded = None
-if selected != NEW_LABEL:
+loaded_project = None
+if selected_project != NEW_LABEL:
     try:
-        pid = int(selected.split(" — ", 1)[0])
-        loaded = fetch_one(pid)
+        project_id = int(selected_project.split(" — ", 1)[0])
+        with conn() as c:
+            df = pd.read_sql_query(f"SELECT * FROM {TABLE} WHERE id=?", c, params=[project_id])
+        loaded_project = df.iloc[0].to_dict() if not df.empty else None
     except Exception:
-        loaded = None
+        loaded_project = None
+
+pillar_list = distinct_values("pillar")
+status_list = distinct_values("status")
+owner_list = distinct_values("owner")
+
+bcol1, bcol2 = st.columns([1, 1])
+new_clicked = bcol1.button("New", key="btn_new_project")
+
+# ✅ FIXED Clear Filters button
+bcol2.button("Clear Filters", key="btn_clear_filters", on_click=reset_filters)
+
+if new_clicked:
+    st.session_state.reset_project_selector = True
+    st.rerun()
 
 
-# ================== EDIT FORM ==================
-st.markdown("---")
+# ------------------ Form (Entry) ------------------
 with st.form("project_form"):
     c1, c2 = st.columns(2)
 
-    # Defaults (from selected row)
-    name_val = (loaded or {}).get("name", "")
-    pillar_val = (loaded or {}).get("pillar", "")
-    priority_val = int((loaded or {}).get("priority", 5) or 5)
-    owner_val = (loaded or {}).get("owner", "")
-    status_val = (loaded or {}).get("status", "")
-    desc_val = (loaded or {}).get("description", "")
+    name_val = loaded_project.get("name") if loaded_project else ""
+    pillar_val = loaded_project.get("pillar") if loaded_project else ""
+    priority_val = int(loaded_project.get("priority", 5)) if loaded_project else 5
+    owner_val = loaded_project.get("owner") if loaded_project else ""
+    status_val = loaded_project.get("status") if loaded_project else ""
+    start_val = try_date(loaded_project.get("start_date")) if loaded_project else date.today()
+    due_val = try_date(loaded_project.get("due_date")) if loaded_project else date.today()
+    desc_val = loaded_project.get("description") if loaded_project else ""
 
-    start_val = try_date((loaded or {}).get("start_date"))
-    due_val = try_date((loaded or {}).get("due_date"))
+    pw_val = loaded_project.get("plainsware_project", "No") if loaded_project else "No"
+    pw_num_val = loaded_project.get("plainsware_number") if loaded_project else None
 
-    pw_val = (loaded or {}).get("plainsware_project", "No") or "No"
-    pw_num_val = (loaded or {}).get("plainsware_number", None)
-
+    # LEFT
     with c1:
-        project_name = st.text_input("Name*", value=name_val)
-        pillar_options = distinct("pillar")
-        project_pillar = st.selectbox("Pillar*", options=(pillar_options or [""]), index=(pillar_options.index(pillar_val) if pillar_val in pillar_options else 0))
-        project_priority = st.number_input("Priority", min_value=1, max_value=99, value=int(priority_val), step=1, format="%d")
-        description = st.text_area("Description", value=desc_val, height=120)
+        project_name = st.text_input("Name*", value=name_val, key="editor_name")
 
+        pillar_options = pillar_list[:] if pillar_list else [""]
+        pillar_index = pillar_options.index(pillar_val) if pillar_val in pillar_options else None
+        project_pillar = st.selectbox(
+            "Pillar*",
+            options=pillar_options,
+            index=pillar_index,
+            placeholder="Select or type a new pillar…",
+            accept_new_options=True,
+            key="editor_pillar",
+        )
+
+        project_priority = st.number_input(
+            "Priority",
+            min_value=1,
+            max_value=99,
+            value=int(priority_val),
+            step=1,
+            format="%d",
+            key="editor_priority",
+        )
+
+        description = st.text_area("Description", value=desc_val, height=120, key="editor_desc")
+
+    # RIGHT
     with c2:
-        owner_options = distinct("owner")
-        project_owner = st.selectbox("Owner*", options=(owner_options or [""]), index=(owner_options.index(owner_val) if owner_val in owner_options else 0))
+        owner_options = owner_list[:] if owner_list else [""]
+        owner_index = owner_options.index(owner_val) if owner_val in owner_options else None
+        project_owner = st.selectbox(
+            "Owner*",
+            options=owner_options,
+            index=owner_index,
+            placeholder="Select or type a new owner…",
+            accept_new_options=True,
+            key="editor_owner",
+        )
 
-        status_options = [""] + distinct("status")
-        project_status = st.selectbox("Status", status_options, index=(status_options.index(status_val) if status_val in status_options else 0))
+        project_status = st.selectbox(
+            "Status",
+            [""] + status_list,
+            index=safe_index([""] + status_list, status_val),
+            key="editor_status",
+        )
 
-        start_date = st.date_input("Start Date", value=start_val)
-        due_date = st.date_input("Due Date", value=due_val)
+        start_date = st.date_input("Start Date", value=start_val, key="editor_start")
+        due_date = st.date_input("Due Date", value=due_val, key="editor_due")
 
-        # ✅ Plainsware selector
         plainsware_project = st.selectbox(
             "Plainsware Project?",
             ["No", "Yes"],
             index=1 if str(pw_val).strip() == "Yes" else 0,
+            key="editor_plainsware_project",
         )
 
-        # ✅ REQUIRED number when Yes
         plainsware_number = None
         if plainsware_project == "Yes":
             default_num = 1
@@ -238,182 +534,386 @@ with st.form("project_form"):
                 pass
 
             plainsware_number = st.number_input(
-                "Plainsware Project Number*",
+                "Plainsware Project Number",
                 min_value=1,
                 step=1,
                 value=default_num,
                 format="%d",
+                key="editor_plainsware_number",
             )
-            st.caption("Required when Plainsware Project is Yes.")
 
-    b1, b2, b3 = st.columns(3)
-    save_new = b1.form_submit_button("Save New")
-    update = b2.form_submit_button("Update")
-    delete = b3.form_submit_button("Delete")
+    col_a, col_b, col_c = st.columns(3)
+    submitted_new = col_a.form_submit_button("Save New")
+    submitted_update = col_b.form_submit_button("Update")
+    submitted_delete = col_c.form_submit_button("Delete")
 
 
-# ================== VALIDATION + CRUD ==================
-def clean(s):
+# ------------------ CRUD Actions (outside form) ------------------
+def _clean(s: Any) -> str:
     return (s or "").strip()
 
 
-def validate_common():
+if submitted_new:
     errors = []
-    if not clean(project_name):
+    project_name_clean = _clean(project_name)
+    project_pillar_clean = _clean(project_pillar)
+    project_owner_clean = _clean(project_owner)
+    project_status_clean = _clean(project_status)
+    safe_priority_val = safe_int(project_priority, default=5)
+
+    if not project_name_clean:
         errors.append("Name is required.")
-    if not clean(project_pillar):
+    if not project_pillar_clean:
         errors.append("Pillar is required.")
-    if not clean(project_owner):
+    if not project_owner_clean:
         errors.append("Owner is required.")
 
-    # ✅ NEW rule: if Plainsware Yes -> number required
+    pw_number_db = None
     if plainsware_project == "Yes":
         if plainsware_number is None:
             errors.append("Plainsware Project Number is required when Plainsware Project is Yes.")
         else:
-            n = safe_int(plainsware_number, default=0)
-            if n <= 0:
+            pw_number_db = safe_int(plainsware_number, default=0)
+            if pw_number_db <= 0:
                 errors.append("Plainsware Project Number must be a positive integer.")
 
-    return errors
-
-
-if save_new:
-    errs = validate_common()
-    if errs:
-        st.error(" ".join(errs))
+    if errors:
+        st.error(" ".join(errors))
     else:
-        pw_number_db = safe_int(plainsware_number, default=0) if plainsware_project == "Yes" else None
-        ts = now_ts()
-        with conn() as c:
-            c.execute(
-                f"""
-                INSERT INTO {TABLE}
-                (name, pillar, priority, description, owner, status, start_date, due_date,
-                 plainsware_project, plainsware_number,
-                 created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    clean(project_name),
-                    clean(project_pillar),
-                    safe_int(project_priority, 5),
-                    clean(description),
-                    clean(project_owner),
-                    clean(project_status),
-                    to_iso(start_date),
-                    to_iso(due_date),
-                    plainsware_project,
-                    pw_number_db,
-                    ts,
-                    ts,
-                ),
-            )
-            c.commit()
-        st.success("✅ Project created!")
-
-
-if update:
-    if not loaded:
-        st.warning("Select an existing project to update.")
-    else:
-        errs = validate_common()
-        if errs:
-            st.error(" ".join(errs))
-        else:
-            pw_number_db = safe_int(plainsware_number, default=0) if plainsware_project == "Yes" else None
+        try:
             ts = now_ts()
             with conn() as c:
                 c.execute(
                     f"""
-                    UPDATE {TABLE}
-                    SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?,
-                        plainsware_project=?, plainsware_number=?,
-                        updated_at=?
-                    WHERE id=?
+                    INSERT INTO {TABLE}
+                    (name, pillar, priority, description, owner, status, start_date, due_date,
+                     plainsware_project, plainsware_number,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        clean(project_name),
-                        clean(project_pillar),
-                        safe_int(project_priority, 5),
-                        clean(description),
-                        clean(project_owner),
-                        clean(project_status),
+                        project_name_clean,
+                        project_pillar_clean,
+                        safe_priority_val,
+                        _clean(description),
+                        project_owner_clean,
+                        project_status_clean,
                         to_iso(start_date),
                         to_iso(due_date),
                         plainsware_project,
                         pw_number_db,
                         ts,
-                        int(loaded["id"]),
+                        ts,
                     ),
                 )
                 c.commit()
-            st.success("✅ Project updated!")
+
+            clear_cached_lists()
+            st.success("✅ Project created successfully!")
+            st.session_state.reset_project_selector = True
+            st.rerun()
+
+        except sqlite3.IntegrityError as e:
+            st.error(f"SQLite IntegrityError: {e}")
+            st.stop()
+        except Exception as e:
+            st.error(f"Unexpected save error: {e}")
+            st.stop()
 
 
-if delete:
-    if not loaded:
+if submitted_update:
+    if not loaded_project:
+        st.warning("Select an existing project to update.")
+    else:
+        errors = []
+        project_name_clean = _clean(project_name)
+        project_pillar_clean = _clean(project_pillar)
+        project_owner_clean = _clean(project_owner)
+        project_status_clean = _clean(project_status)
+        safe_priority_val = safe_int(project_priority, default=5)
+
+        if not project_name_clean:
+            errors.append("Name is required.")
+        if not project_pillar_clean:
+            errors.append("Pillar is required.")
+        if not project_owner_clean:
+            errors.append("Owner is required.")
+
+        pw_number_db = None
+        if plainsware_project == "Yes":
+            if plainsware_number is None:
+                errors.append("Plainsware Project Number is required when Plainsware Project is Yes.")
+            else:
+                pw_number_db = safe_int(plainsware_number, default=0)
+                if pw_number_db <= 0:
+                    errors.append("Plainsware Project Number must be a positive integer.")
+
+        if errors:
+            st.error(" ".join(errors))
+        else:
+            try:
+                ts = now_ts()
+                with conn() as c:
+                    c.execute(
+                        f"""
+                        UPDATE {TABLE}
+                        SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?,
+                            plainsware_project=?, plainsware_number=?,
+                            updated_at=?
+                        WHERE id=?
+                        """,
+                        (
+                            project_name_clean,
+                            project_pillar_clean,
+                            safe_priority_val,
+                            _clean(description),
+                            project_owner_clean,
+                            project_status_clean,
+                            to_iso(start_date),
+                            to_iso(due_date),
+                            plainsware_project,
+                            pw_number_db,
+                            ts,
+                            int(loaded_project["id"]),
+                        ),
+                    )
+                    c.commit()
+
+                clear_cached_lists()
+                st.success("✅ Project updated!")
+                st.rerun()
+
+            except sqlite3.IntegrityError as e:
+                st.error(f"SQLite IntegrityError: {e}")
+                st.stop()
+
+
+if submitted_delete:
+    if not loaded_project:
         st.warning("Select an existing project to delete.")
     else:
-        with conn() as c:
-            c.execute(f"DELETE FROM {TABLE} WHERE id=?", (int(loaded["id"]),))
-            c.commit()
-        st.warning("Project deleted.")
+        try:
+            with conn() as c:
+                c.execute(f"DELETE FROM {TABLE} WHERE id=?", (int(loaded_project["id"]),))
+                c.commit()
+
+            clear_cached_lists()
+            st.warning("Project deleted.")
+            st.session_state.reset_project_selector = True
+            st.rerun()
+
+        except sqlite3.IntegrityError as e:
+            st.error(f"SQLite IntegrityError: {e}")
+            st.stop()
 
 
-# ================== FILTERS ==================
+# ------------------ Global Filters ------------------
 st.markdown("---")
 st.subheader("Filters")
 
-f1, f2, f3, f4, f5, f6 = st.columns([1, 1, 1, 1, 1, 2])
+colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
 
-pillars = [ALL_LABEL] + distinct("pillar")
-statuses = [ALL_LABEL] + distinct("status")
-owners = [ALL_LABEL] + distinct("owner")
-priorities = [ALL_LABEL] + sorted({str(x) for x in distinct("priority") if str(x).isdigit()})
+pillars = [ALL_LABEL] + distinct_values("pillar")
+statuses = [ALL_LABEL] + distinct_values("status")
+owners = [ALL_LABEL] + distinct_values("owner")
+
+priority_vals: List[int] = []
+try:
+    pv = distinct_values("priority")
+    priority_vals = sorted({int(x) for x in pv if str(x).strip().isdigit()})
+except Exception:
+    pass
+priority_opts = [ALL_LABEL] + [str(x) for x in priority_vals]
+
 plainsware_opts = [ALL_LABEL, "Yes", "No"]
 
-f1.selectbox("Pillar", pillars, key="pillar_f")
-f2.selectbox("Status", statuses, key="status_f")
-f3.selectbox("Owner", owners, key="owner_f")
-f4.selectbox("Priority", priorities, key="priority_f")
-f5.selectbox("Plainsware", plainsware_opts, key="plainsware_f")
-f6.text_input("Search", key="search_f")
+pillar_f = colF1.selectbox("Pillar", pillars, key="pillar_f")
+status_f = colF2.selectbox("Status", statuses, key="status_f")
+owner_f = colF3.selectbox("Owner", owners, key="owner_f")
+priority_f = colF4.selectbox("Priority", priority_opts, key="priority_f")
+plainsware_f = colF5.selectbox("Plainsware", plainsware_opts, key="plainsware_f")
+search_f = colF6.text_input("Search", key="search_f")
 
-if st.session_state._filters_cleared:
-    st.toast("Filters cleared", icon="✅")
-    st.session_state._filters_cleared = False
+filters = dict(
+    pillar=pillar_f,
+    status=status_f,
+    owner=owner_f,
+    priority=priority_f,
+    plainsware=plainsware_f,
+    search=search_f,
+)
+
+data = fetch_df(filters)
+
+# ------------------ Derived Years ------------------
+data["start_year"] = pd.to_datetime(data.get("start_date", ""), errors="coerce").dt.year
+data["due_year"] = pd.to_datetime(data.get("due_date", ""), errors="coerce").dt.year
 
 
-# ================== APPLY FILTERS ==================
-filters = {
-    "pillar": st.session_state.pillar_f,
-    "status": st.session_state.status_f,
-    "owner": st.session_state.owner_f,
-    "priority": st.session_state.priority_f,
-    "plainsware": st.session_state.plainsware_f,
-    "search": st.session_state.search_f,
-}
-df = fetch_data(filters)
-
-
-# ================== DASHBOARD ==================
+# ------------------ Report Controls ------------------
 st.markdown("---")
-st.subheader("Summary")
+st.subheader("Report Controls")
 
-c1, c2, c3 = st.columns(3)
-c1.metric("Projects", len(df))
-c2.metric("Completed", (df["status"].apply(status_to_state) == "Completed").sum() if not df.empty else 0)
-c3.metric("Ongoing", (df["status"].apply(status_to_state) == "Ongoing").sum() if not df.empty else 0)
+rc1, rc2, rc3, rc4 = st.columns([1, 1, 1, 2])
+year_mode = rc1.radio("Year Type", ["Start Year", "Due Year"], key="year_mode")
+year_col = "start_year" if year_mode == "Start Year" else "due_year"
 
-if not df.empty:
-    fig = px.bar(
-        df.groupby("pillar").size().reset_index(name="count"),
-        x="pillar",
-        y="count",
-        title="Projects by Pillar",
+years = [ALL_LABEL] + sorted(data[year_col].dropna().astype(int).unique().tolist())
+year_f = rc2.selectbox("Year", years, key="year_f")
+
+top_n = rc3.slider("Top N per Pillar", min_value=1, max_value=10, value=5, key="top_n")
+show_all = rc4.checkbox("Show ALL Reports", value=True, key="show_all_reports")
+
+if not show_all:
+    cK1, cK2, cK3, cK4 = st.columns(4)
+    show_kpi = cK1.checkbox("KPI Cards", True, key="show_kpi")
+    show_pillar_chart = cK2.checkbox("Pillar Status Chart", True, key="show_pillar_chart")
+    show_roadmap = cK3.checkbox("Roadmap", True, key="show_roadmap")
+    show_table = cK4.checkbox("Projects Table", True, key="show_table")
+else:
+    show_kpi = show_pillar_chart = show_roadmap = show_table = True
+
+if year_f != ALL_LABEL:
+    data = data[data[year_col] == int(year_f)]
+
+
+# ------------------ KPI Cards ------------------
+if show_kpi:
+    st.markdown("---")
+    k1, k2, k3, k4 = st.columns(4)
+    total = len(data)
+    completed = (data["status"].apply(status_to_state) == "Completed").sum()
+    ongoing = (data["status"].apply(status_to_state) != "Completed").sum()
+    pillars_count = data["pillar"].replace("", pd.NA).dropna().nunique()
+
+    k1.metric("Projects", total)
+    k2.metric("Completed", completed)
+    k3.metric("Ongoing", ongoing)
+    k4.metric("Distinct Pillars", int(pillars_count))
+
+
+# ------------------ Pillar Status Chart ------------------
+if show_pillar_chart:
+    st.markdown("---")
+    status_df = data.copy()
+    if not status_df.empty:
+        status_df["state"] = status_df["status"].apply(status_to_state)
+        pillar_summary = (
+            status_df.groupby(["pillar", "state"], dropna=False)
+            .size()
+            .reset_index(name="count")
+        )
+        pillar_summary["pillar"] = pillar_summary["pillar"].replace("", "(Unspecified)")
+        fig = px.bar(
+            pillar_summary,
+            x="pillar",
+            y="count",
+            color="state",
+            barmode="group",
+            title="Projects by Pillar — Completed vs Ongoing",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No data available for pillar chart.")
+
+
+# ------------------ Top N per Pillar ------------------
+st.markdown("---")
+st.subheader(f"Top {top_n} Projects per Pillar")
+
+if not data.empty:
+    top_df = (
+        data.replace({"pillar": {"": "(Unspecified)"}})
+        .sort_values(["pillar", "priority", "name"], na_position="last")
+        .groupby("pillar", dropna=False, as_index=False)
+        .head(top_n)
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(top_df, use_container_width=True)
+else:
+    st.info("No projects to display for Top N.")
 
-st.subheader("Projects")
-st.dataframe(df, use_container_width=True)
+
+# ------------------ Roadmap ------------------
+roadmap_fig = None
+if show_roadmap:
+    st.markdown("---")
+    st.subheader("Roadmap")
+
+    gantt = data.copy()
+    gantt["Start"] = pd.to_datetime(gantt.get("start_date", ""), errors="coerce")
+    gantt["Finish"] = pd.to_datetime(gantt.get("due_date", ""), errors="coerce")
+    gantt = gantt.dropna(subset=["Start", "Finish"])
+
+    if not gantt.empty:
+        roadmap_fig = px.timeline(
+            gantt, x_start="Start", x_end="Finish", y="name", color="pillar",
+            title="Project Timeline"
+        )
+        roadmap_fig.update_yaxes(autorange="reversed")
+        st.plotly_chart(roadmap_fig, use_container_width=True)
+    else:
+        st.info("No valid date ranges to draw the roadmap.")
+
+
+# ------------------ Projects Table ------------------
+if show_table:
+    st.markdown("---")
+    st.subheader("Projects")
+    st.dataframe(data, use_container_width=True)
+
+
+# ------------------ Export Options ------------------
+st.markdown("---")
+st.subheader("Export Options")
+
+st.download_button(
+    "⬇️ Download CSV Report (Filtered)",
+    data=data.to_csv(index=False).encode("utf-8"),
+    file_name="portfolio_filtered.csv",
+    mime="text/csv",
+    key="export_csv_filtered",
+)
+
+full_df = fetch_all_projects()
+st.download_button(
+    "🗄️ Download FULL Database (CSV)",
+    data=full_df.to_csv(index=False).encode("utf-8"),
+    file_name="portfolio_full_database.csv",
+    mime="text/csv",
+    key="export_csv_full_db",
+)
+
+if REPORTLAB_AVAILABLE:
+    pdf_bytes = build_pdf_report(data, title="Digital Portfolio Report (Filtered)")
+    st.download_button(
+        "🖨️ Download Printable Report (PDF)",
+        data=pdf_bytes,
+        file_name="portfolio_report_filtered.pdf",
+        mime="application/pdf",
+        key="export_pdf_filtered",
+    )
+
+if roadmap_fig is not None:
+    st.markdown("---")
+    st.subheader("Export Roadmap")
+
+    st.download_button(
+        "🌐 Download Roadmap (Interactive HTML)",
+        data=roadmap_fig.to_html(include_plotlyjs="cdn"),
+        file_name="roadmap.html",
+        mime="text/html",
+        key="export_roadmap_html",
+    )
+
+    if KALEIDO_AVAILABLE:
+        try:
+            img_bytes = pio.to_image(roadmap_fig, format="png", scale=2)
+            st.download_button(
+                "📸 Download Roadmap (PNG)",
+                data=img_bytes,
+                file_name="roadmap.png",
+                mime="image/png",
+                key="export_roadmap_png",
+            )
+        except Exception as e:
+            st.info(f"PNG export unavailable in this runtime: {e}")
