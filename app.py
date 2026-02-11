@@ -58,12 +58,14 @@ def conn() -> sqlite3.Connection:
 
 def ensure_schema_and_migrate() -> None:
     """
-    Ensure the projects table exists and matches EXPECTED_COLUMNS.
-    Adds missing nullable/defaulted columns safely. If table has required-column issues
-    or extra NOT NULL columns with no default, rebuild table and copy common columns.
+    Ensure the projects table exists and includes Plainsware columns.
+    - Creates table if missing
+    - Renames legacy typo columns (plainsware_proj -> plainsware_project)
+    - Adds missing columns via ALTER TABLE ADD COLUMN
+    - Rebuilds table if needed
     """
     with conn() as c:
-        # Base create (new installs)
+        # 1) Create base table (new installs)
         c.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -83,35 +85,49 @@ def ensure_schema_and_migrate() -> None:
         )
         c.commit()
 
+        # 2) Introspect existing columns
         info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
         existing_cols = info["name"].tolist()
+        existing_set = set(existing_cols)
 
-        # Add missing columns (safe ones)
-        missing = [col for col in EXPECTED_COLUMNS.keys() if col not in existing_cols]
-        for col in missing:
-            # Avoid trying to add NOT NULL required columns without default
-            if col in ("id", "name", "pillar"):
-                continue
-            c.execute(f"ALTER TABLE {TABLE} ADD COLUMN {col} {EXPECTED_COLUMNS[col]}")
+        # 3) Fix common legacy/typo column names
+        # SQLite supports ALTER TABLE RENAME COLUMN in modern versions. [3](https://predictivehacks.com/creating-dynamic-forms-with-streamlit-a-step-by-step-guide/)[4](https://stackoverflow.com/questions/73049262/update-value-for-selectbox-in-streamlit-in-real-time)[5](https://github.com/streamlit/streamlit/issues/9030)
+        if "plainsware_proj" in existing_set and "plainsware_project" not in existing_set:
+            try:
+                c.execute(
+                    f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_proj" TO "plainsware_project"'
+                )
+                c.commit()
+            except Exception:
+                _rebuild_projects_table(c)
+
+        if "plainsware_num" in existing_set and "plainsware_number" not in existing_set:
+            try:
+                c.execute(
+                    f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_num" TO "plainsware_number"'
+                )
+                c.commit()
+            except Exception:
+                _rebuild_projects_table(c)
+
+        # Refresh after potential rename
+        info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
+        existing_cols = info["name"].tolist()
+        existing_set = set(existing_cols)
+
+        # 4) Add missing columns safely
+        for col, ddl in EXPECTED_COLUMNS.items():
+            if col not in existing_set:
+                # Avoid adding required NOT NULL without default via ALTER
+                if col in ("id", "name", "pillar"):
+                    continue
+                try:
+                    c.execute(f"ALTER TABLE {TABLE} ADD COLUMN {col} {ddl}")
+                except Exception:
+                    _rebuild_projects_table(c)
+                    break
+
         c.commit()
-
-        # Reload
-        info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
-        existing_cols = info["name"].tolist()
-
-        # If required columns missing, rebuild
-        if "name" not in existing_cols or "pillar" not in existing_cols:
-            _rebuild_projects_table(c)
-            return
-
-        # Detect extra NOT NULL columns with no default (these can break inserts)
-        extra_notnull = info[
-            (~info["name"].isin(EXPECTED_COLUMNS.keys()))
-            & (info["notnull"] == 1)
-            & (info["dflt_value"].isna())
-        ]
-        if not extra_notnull.empty:
-            _rebuild_projects_table(c)
 
 
 def _rebuild_projects_table(c: sqlite3.Connection) -> None:
@@ -119,7 +135,23 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
     old_info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
     old_cols = old_info["name"].tolist()
 
-    keep_cols = [col for col in EXPECTED_COLUMNS.keys() if col in old_cols and col != "id"]
+    # Map legacy typo names to correct ones during rebuild
+    legacy_map = {
+        "plainsware_proj": "plainsware_project",
+        "plainsware_num": "plainsware_number",
+    }
+
+    keep_cols_old = []
+    keep_cols_new = []
+    for col in old_cols:
+        if col == "id":
+            continue
+        if col in EXPECTED_COLUMNS:
+            keep_cols_old.append(col)
+            keep_cols_new.append(col)
+        elif col in legacy_map and legacy_map[col] in EXPECTED_COLUMNS:
+            keep_cols_old.append(col)
+            keep_cols_new.append(legacy_map[col])
 
     c.execute("BEGIN")
     c.execute(
@@ -140,12 +172,13 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
         """
     )
 
-    if keep_cols:
-        cols_csv = ", ".join(keep_cols)
+    if keep_cols_old:
+        src = ", ".join(keep_cols_old)
+        dst = ", ".join(keep_cols_new)
         c.execute(
             f"""
-            INSERT INTO {TABLE}__new ({cols_csv})
-            SELECT {cols_csv} FROM {TABLE}
+            INSERT INTO {TABLE}__new ({dst})
+            SELECT {src} FROM {TABLE}
             """
         )
 
@@ -200,6 +233,11 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
             if filters.get(col) and filters[col] != ALL_LABEL:
                 where.append(f"{col} = ?")
                 args.append(filters[col])
+
+        # NEW: Plainsware Yes/No filter
+        if filters.get("plainsware") and filters["plainsware"] != ALL_LABEL:
+            where.append("plainsware_project = ?")
+            args.append(filters["plainsware"])
 
         if filters.get("priority") and filters["priority"] != ALL_LABEL:
             where.append("priority = ?")
@@ -301,7 +339,7 @@ if not os.path.exists(DB_PATH):
 
 
 # ------------------ Session State (safe reset pattern) ------------------
-# IMPORTANT: apply reset BEFORE widget instantiation (prevents StreamlitAPIException)
+# Streamlit disallows setting session_state for a widget key after the widget is created. [1](https://stackoverflow.com/questions/72548682/streamlit-run-file-name-py-syntaxerror-invalid-syntax)[2](https://engage.cloud.microsoft/main/threads/eyJfdHlwZSI6IlRocmVhZCIsImlkIjoiMzM2NDI2MjQ3OTg5NjU3NiJ9)
 if "project_selector" not in st.session_state:
     st.session_state.project_selector = NEW_LABEL
 
@@ -354,7 +392,7 @@ if new_clicked:
     st.rerun()
 
 if clear_clicked:
-    for k in ["pillar_f", "status_f", "owner_f", "priority_f", "search_f"]:
+    for k in ["pillar_f", "status_f", "owner_f", "priority_f", "plainsware_f", "search_f"]:
         if k in st.session_state:
             del st.session_state[k]
     st.toast("Cleared filters.", icon="✅")
@@ -373,7 +411,7 @@ with st.form("project_form"):
     due_val = try_date(loaded_project.get("due_date")) if loaded_project else date.today()
     desc_val = loaded_project.get("description") if loaded_project else ""
 
-    # Plainsware defaults (NEW)
+    # Plainsware defaults
     pw_val = loaded_project.get("plainsware_project", "No") if loaded_project else "No"
     pw_num_val = loaded_project.get("plainsware_number") if loaded_project else None
 
@@ -427,7 +465,6 @@ with st.form("project_form"):
         start_date = st.date_input("Start Date", value=start_val, key="editor_start")
         due_date = st.date_input("Due Date", value=due_val, key="editor_due")
 
-        # Plainsware fields (NEW)
         plainsware_project = st.selectbox(
             "Plainsware Project?",
             ["No", "Yes"],
@@ -617,7 +654,8 @@ if submitted_delete:
 st.markdown("---")
 st.subheader("Filters")
 
-colF1, colF2, colF3, colF4, colF6 = st.columns([1, 1, 1, 1, 2])
+# Added one more column for Plainsware filter
+colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
 
 pillars = [ALL_LABEL] + distinct_values("pillar")
 statuses = [ALL_LABEL] + distinct_values("status")
@@ -631,13 +669,24 @@ except Exception:
     pass
 priority_opts = [ALL_LABEL] + [str(x) for x in priority_vals]
 
+plainsware_opts = [ALL_LABEL, "Yes", "No"]
+
 pillar_f = colF1.selectbox("Pillar", pillars, key="pillar_f")
 status_f = colF2.selectbox("Status", statuses, key="status_f")
 owner_f = colF3.selectbox("Owner", owners, key="owner_f")
 priority_f = colF4.selectbox("Priority", priority_opts, key="priority_f")
+plainsware_f = colF5.selectbox("Plainsware", plainsware_opts, key="plainsware_f")
 search_f = colF6.text_input("Search", key="search_f")
 
-filters = dict(pillar=pillar_f, status=status_f, owner=owner_f, priority=priority_f, search=search_f)
+filters = dict(
+    pillar=pillar_f,
+    status=status_f,
+    owner=owner_f,
+    priority=priority_f,
+    plainsware=plainsware_f,   # NEW
+    search=search_f,
+)
+
 data = fetch_df(filters)
 
 # ------------------ Derived Years ------------------
@@ -732,7 +781,9 @@ else:
 roadmap_fig = None
 if show_roadmap:
     st.markdown("---")
-    st.subheader("Roadmappy()
+    st.subheader("Roadmap")
+
+    gantt = data.copy()
     gantt["Start"] = pd.to_datetime(gantt.get("start_date", ""), errors="coerce")
     gantt["Finish"] = pd.to_datetime(gantt.get("due_date", ""), errors="coerce")
     gantt = gantt.dropna(subset=["Start", "Finish"])
@@ -759,7 +810,7 @@ if show_table:
     st.dataframe(data, use_container_width=True)
 
 
-# ------------------ Export Options (outside form) ------------------
+# ------------------ Export Options ------------------
 st.markdown("---")
 st.subheader("Export Options")
 
