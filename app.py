@@ -60,7 +60,21 @@ EXPECTED_COLUMNS = {
 }
 
 # ------------------ Callbacks ------------------
+def reset_filters():
+    """Reset filter widgets back to defaults."""
+    st.session_state.update({
+        "pillar_f": ALL_LABEL,
+        "status_f": ALL_LABEL,
+        "owner_f": ALL_LABEL,
+        "priority_f": ALL_LABEL,
+        "plainsware_f": ALL_LABEL,
+        "search_f": "",
+    })
 
+    st.toast("Cleared filters.", icon="✅")
+
+
+st.button("Clear Filters", on_click=reset_filters)
 # ------------------ Constants ------------------
 DB_PATH = "portfolio.db"
 TABLE = "projects"
