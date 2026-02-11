@@ -114,6 +114,7 @@ def reset_filters():
     st.session_state["_do_rerun"] = True
 
 # ------------------ DB / Utility Helpers ------------------
+
 def conn() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
@@ -139,12 +140,11 @@ def ensure_schema_and_migrate() -> None:
     """
     Ensure the projects table exists and includes required columns.
     - Creates table if missing
-    - Renames legacy typo columns (plainsware_proj -> plainsware_project; plainsware_num -> plainsware_number)
-    - Detects NOT NULL columns w/ no default (esp. created_at) and rebuilds table
-    - Adds missing columns via ALTER TABLE ADD COLUMN
+    - Renames legacy typo columns
+    - Rebuilds table when constraints would break inserts
+    - Adds missing columns
     """
     with conn() as c:
-        # Base create
         c.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -160,7 +160,11 @@ def ensure_schema_and_migrate() -> None:
                 plainsware_project TEXT DEFAULT 'No',
                 plainsware_number INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK (
+                    plainsware_project != 'Yes'
+                    OR (plainsware_number IS NOT NULL AND plainsware_number != '')
+                )
             )
             """
         )
@@ -169,32 +173,33 @@ def ensure_schema_and_migrate() -> None:
         info = _table_info_df(c)
         existing_set = set(info["name"].tolist())
 
-        # Rename legacy typo columns if present (fallback to rebuild on failure)
+        # Rename legacy columns
         if "plainsware_proj" in existing_set and "plainsware_project" not in existing_set:
             try:
-                c.execute(f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_proj" TO "plainsware_project"')
+                c.execute(
+                    f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_proj" TO "plainsware_project"'
+                )
                 c.commit()
             except Exception:
                 _rebuild_projects_table(c)
 
         if "plainsware_num" in existing_set and "plainsware_number" not in existing_set:
             try:
-                c.execute(f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_num" TO "plainsware_number"')
+                c.execute(
+                    f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_num" TO "plainsware_number"'
+                )
                 c.commit()
             except Exception:
                 _rebuild_projects_table(c)
 
-        # Refresh
         info = _table_info_df(c)
         existing_set = set(info["name"].tolist())
 
-        # If created_at is NOT NULL and has no default, rebuild
         if _needs_rebuild_due_to_created_at(info):
             _rebuild_projects_table(c)
             info = _table_info_df(c)
             existing_set = set(info["name"].tolist())
 
-        # If there are ANY extra NOT NULL columns w/ no default (can break inserts), rebuild
         extra_notnull = info[
             (~info["name"].isin(EXPECTED_COLUMNS.keys()))
             & (info["notnull"] == 1)
@@ -205,7 +210,6 @@ def ensure_schema_and_migrate() -> None:
             info = _table_info_df(c)
             existing_set = set(info["name"].tolist())
 
-        # Add missing columns
         for col, ddl in EXPECTED_COLUMNS.items():
             if col not in existing_set:
                 if col in ("id", "name", "pillar"):
@@ -220,7 +224,7 @@ def ensure_schema_and_migrate() -> None:
 
 
 def _rebuild_projects_table(c: sqlite3.Connection) -> None:
-    """Rebuild projects table to match expected schema, copying intersecting columns."""
+    """Rebuild projects table to match expected schema."""
     old_info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
     old_cols = old_info["name"].tolist()
 
@@ -229,8 +233,7 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
         "plainsware_num": "plainsware_number",
     }
 
-    keep_old = []
-    keep_new = []
+    keep_old, keep_new = [], []
     for col in old_cols:
         if col == "id":
             continue
@@ -244,7 +247,7 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
     c.execute("BEGIN")
     c.execute(
         f"""
-        CREATE TABLE IF NOT EXISTS {TABLE}__new (
+        CREATE TABLE {TABLE}__new (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             pillar TEXT NOT NULL,
@@ -257,29 +260,50 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
             plainsware_project TEXT DEFAULT 'No',
             plainsware_number INTEGER,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK (
+                plainsware_project != 'Yes'
+                OR (plainsware_number IS NOT NULL AND plainsware_number != '')
+            )
         )
         """
     )
 
     if keep_old:
-        src = ", ".join(keep_old)
-        dst = ", ".join(keep_new)
         c.execute(
             f"""
-            INSERT INTO {TABLE}__new ({dst})
-            SELECT {src} FROM {TABLE}
+            INSERT INTO {TABLE}__new ({", ".join(keep_new)})
+            SELECT {", ".join(keep_old)} FROM {TABLE}
             """
         )
 
-    # Ensure timestamps are not null
-    c.execute(f"UPDATE {TABLE}__new SET created_at = COALESCE(NULLIF(created_at,''), CURRENT_TIMESTAMP)")
-    c.execute(f"UPDATE {TABLE}__new SET updated_at = COALESCE(NULLIF(updated_at,''), CURRENT_TIMESTAMP)")
+    c.execute(
+        f"""
+        UPDATE {TABLE}__new
+        SET created_at = COALESCE(NULLIF(created_at,''), CURRENT_TIMESTAMP),
+            updated_at = COALESCE(NULLIF(updated_at,''), CURRENT_TIMESTAMP)
+        """
+    )
 
     c.execute(f"DROP TABLE {TABLE}")
     c.execute(f"ALTER TABLE {TABLE}__new RENAME TO {TABLE}")
     c.execute("COMMIT")
 
+
+# ---------- Validation Helpers ----------
+
+def validate_plainsware(plainsware_project: str, plainsware_number: Any) -> None:
+    """
+    Enforce: If Planisware = Yes, a manual Planisware number is required.
+    """
+    if str(plainsware_project).strip().lower() == "yes":
+        if plainsware_number in (None, "", 0):
+            raise ValueError(
+                "Planisware Number is required when Planisware is set to Yes."
+            )
+
+
+# ---------- Misc Helpers ----------
 
 def to_iso(d: Optional[date]) -> str:
     return d.strftime("%Y-%m-%d") if d else ""
@@ -301,126 +325,6 @@ def safe_index(options: List[str], val: Optional[str], default: int = 0) -> int:
     except Exception:
         pass
     return default
-
-
-@st.cache_data(show_spinner=False)
-def distinct_values(col: str) -> List[str]:
-    with conn() as c:
-        df = pd.read_sql_query(
-            f"""
-            SELECT DISTINCT {col}
-            FROM {TABLE}
-            WHERE {col} IS NOT NULL AND TRIM({col}) <> ''
-            ORDER BY {col}
-            """,
-            c,
-        )
-    return df[col].dropna().astype(str).tolist()
-
-
-def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-    q = f"SELECT * FROM {TABLE}"
-    args, where = [], []
-
-    if filters:
-        for col in ["pillar", "status", "owner"]:
-            if filters.get(col) and filters[col] != ALL_LABEL:
-                where.append(f"{col} = ?")
-                args.append(filters[col])
-
-        # Plainsware filter (All/Yes/No)
-        if filters.get("plainsware") and filters["plainsware"] != ALL_LABEL:
-            where.append("plainsware_project = ?")
-            args.append(filters["plainsware"])
-
-        if filters.get("priority") and filters["priority"] != ALL_LABEL:
-            where.append("priority = ?")
-            try:
-                args.append(int(filters["priority"]))
-            except Exception:
-                where.pop()
-
-        if filters.get("search"):
-            s = f"%{filters['search'].lower()}%"
-            where.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
-            args.extend([s, s])
-
-    if where:
-        q += " WHERE " + " AND ".join(where)
-
-    q += " ORDER BY COALESCE(start_date,''), COALESCE(due_date,''), COALESCE(created_at,'')"
-
-    with conn() as c:
-        return pd.read_sql_query(q, c, params=args)
-
-
-def fetch_all_projects() -> pd.DataFrame:
-    with conn() as c:
-        return pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY id", c)
-
-
-def status_to_state(x: Any) -> str:
-    s = str(x).strip().lower()
-    return "Completed" if s in {"done", "complete", "completed"} else "Ongoing"
-
-
-def safe_int(x: Any, default: int = 5) -> int:
-    try:
-        return int(x)
-    except Exception:
-        return default
-
-
-def clear_cached_lists() -> None:
-    try:
-        st.cache_data.clear()
-    except Exception:
-        pass
-
-
-def build_pdf_report(df: pd.DataFrame, title: str = "Digital Portfolio Report") -> bytes:
-    if not REPORTLAB_AVAILABLE:
-        raise RuntimeError("reportlab not installed")
-
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=letter)
-    width, height = letter
-
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(40, height - 45, title)
-
-    c.setFont("Helvetica", 10)
-    c.drawString(40, height - 65, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    c.drawString(40, height - 80, f"Rows: {len(df)}")
-
-    cols = [
-        "id", "name", "pillar", "priority", "owner", "status",
-        "start_date", "due_date",
-        "plainsware_project", "plainsware_number",
-        "created_at", "updated_at",
-    ]
-    cols = [col for col in cols if col in df.columns]
-
-    y = height - 110
-    c.setFont("Helvetica-Bold", 9)
-    c.drawString(40, y, " | ".join(cols))
-    y -= 14
-
-    c.setFont("Helvetica", 8)
-    preview = df[cols].fillna("").head(40)
-    for _, row in preview.iterrows():
-        line = " | ".join(str(row[col])[:28] for col in cols)
-        c.drawString(40, y, line)
-        y -= 10
-        if y < 50:
-            c.showPage()
-            y = height - 50
-            c.setFont("Helvetica", 8)
-
-    c.showPage()
-    c.save()
-    buf.seek(0)
-    return buf.read()
 
 
 # ------------------ App Boot ------------------
