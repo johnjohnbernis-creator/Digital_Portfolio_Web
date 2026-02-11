@@ -124,6 +124,7 @@ def _table_info_df(c: sqlite3.Connection) -> pd.DataFrame:
 
 
 def _needs_rebuild_due_to_created_at(info: pd.DataFrame) -> bool:
+    """Rebuild if created_at exists and is NOT NULL but has no default."""
     if info.empty:
         return False
     row = info[info["name"] == "created_at"]
@@ -136,6 +137,9 @@ def _needs_rebuild_due_to_created_at(info: pd.DataFrame) -> bool:
 
 
 def ensure_schema_and_migrate() -> None:
+    """
+    Ensure the projects table exists and includes required columns.
+    """
     with conn() as c:
         c.execute(
             f"""
@@ -152,21 +156,17 @@ def ensure_schema_and_migrate() -> None:
                 plainsware_project TEXT DEFAULT 'No',
                 plainsware_number INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                CHECK (
-                    plainsware_project != 'Yes'
-                    OR (plainsware_number IS NOT NULL AND plainsware_number != '')
-                )
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
         c.commit()
 
         info = _table_info_df(c)
-        existing = set(info["name"].tolist())
+        existing_set = set(info["name"].tolist())
 
-        # Rename legacy columns
-        if "plainsware_proj" in existing and "plainsware_project" not in existing:
+        # Rename legacy typo columns
+        if "plainsware_proj" in existing_set and "plainsware_project" not in existing_set:
             try:
                 c.execute(
                     f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_proj" TO "plainsware_project"'
@@ -175,7 +175,7 @@ def ensure_schema_and_migrate() -> None:
             except Exception:
                 _rebuild_projects_table(c)
 
-        if "plainsware_num" in existing and "plainsware_number" not in existing:
+        if "plainsware_num" in existing_set and "plainsware_number" not in existing_set:
             try:
                 c.execute(
                     f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_num" TO "plainsware_number"'
@@ -185,15 +185,15 @@ def ensure_schema_and_migrate() -> None:
                 _rebuild_projects_table(c)
 
         info = _table_info_df(c)
-        existing = set(info["name"].tolist())
+        existing_set = set(info["name"].tolist())
 
         if _needs_rebuild_due_to_created_at(info):
             _rebuild_projects_table(c)
             info = _table_info_df(c)
-            existing = set(info["name"].tolist())
+            existing_set = set(info["name"].tolist())
 
         for col, ddl in EXPECTED_COLUMNS.items():
-            if col not in existing and col not in ("id", "name", "pillar"):
+            if col not in existing_set and col not in ("id", "name", "pillar"):
                 try:
                     c.execute(f"ALTER TABLE {TABLE} ADD COLUMN {col} {ddl}")
                 except Exception:
@@ -204,6 +204,7 @@ def ensure_schema_and_migrate() -> None:
 
 
 def _rebuild_projects_table(c: sqlite3.Connection) -> None:
+    """Rebuild projects table to match expected schema."""
     old_info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
     old_cols = old_info["name"].tolist()
 
@@ -239,11 +240,7 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
             plainsware_project TEXT DEFAULT 'No',
             plainsware_number INTEGER,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            CHECK (
-                plainsware_project != 'Yes'
-                OR (plainsware_number IS NOT NULL AND plainsware_number != '')
-            )
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
@@ -269,9 +266,12 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
     c.execute("COMMIT")
 
 
-# ------------------ Validation ------------------
+# ------------------ VALIDATION ------------------
 
 def validate_plainsware(plainsware_project: str, plainsware_number: Any) -> None:
+    """
+    Enforce: If Planisware = Yes, a manual Planisware number is required.
+    """
     if str(plainsware_project).strip().lower() == "yes":
         if plainsware_number in (None, "", 0):
             raise ValueError(
@@ -375,7 +375,6 @@ def clear_cached_lists() -> None:
         st.cache_data.clear()
     except Exception:
         pass
-``
 
 # ------------------ App Boot ------------------
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
