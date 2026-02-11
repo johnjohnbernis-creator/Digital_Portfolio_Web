@@ -298,18 +298,6 @@ def build_pdf_report(df: pd.DataFrame, title: str = "Digital Portfolio Report") 
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
 st.title("Digital Portfolio — Web Version")
 
-ensure_schema_and_migrate()
-
-# Hide schema by default; show only via sidebar toggle
-if st.sidebar.checkbox("Show debug tools", value=False):
-    with st.expander("🔧 Debug: Database schema", expanded=False):
-        st.dataframe(table_info(TABLE), use_container_width=True)
-
-if not os.path.exists(DB_PATH):
-    st.error("Database not found.")
-    st.stop()
-
-
 # ------------------ Session State (RESET FIX) ------------------
 # IMPORTANT: apply reset BEFORE widget instantiation (prevents StreamlitAPIException)
 if "project_selector" not in st.session_state:
