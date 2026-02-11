@@ -11,7 +11,6 @@ import plotly.express as px
 import plotly.io as pio
 import streamlit as st
 
-
 # ------------------ Optional dependencies ------------------
 # PDF (ReportLab)
 try:
@@ -35,6 +34,10 @@ TABLE = "projects"
 NEW_LABEL = "<New Project>"
 ALL_LABEL = "All"
 
+def now_ts() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 EXPECTED_COLUMNS = {
     "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
     "name": "TEXT NOT NULL",
@@ -45,9 +48,15 @@ EXPECTED_COLUMNS = {
     "status": "TEXT",
     "start_date": "TEXT",
     "due_date": "TEXT",
-    # NEW:
-    "plainsware_project": "TEXT DEFAULT 'No'",  # Yes/No
-    "plainsware_number": "INTEGER",            # required only if Yes
+
+    # Plainsware (NEW)
+    "plainsware_project": "TEXT DEFAULT 'No'",
+    "plainsware_number": "INTEGER",
+
+    # Timestamps (FIX for your error)
+    # NOT NULL + default; but we also set them explicitly on INSERT/UPDATE
+    "created_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
 }
 
 
@@ -58,14 +67,13 @@ def conn() -> sqlite3.Connection:
 
 def ensure_schema_and_migrate() -> None:
     """
-    Ensure the projects table exists and includes Plainsware columns.
+    Ensure the projects table exists and includes required columns.
     - Creates table if missing
-    - Renames legacy typo columns (plainsware_proj -> plainsware_project)
+    - Renames legacy typo columns (plainsware_proj -> plainsware_project, plainsware_num -> plainsware_number)
     - Adds missing columns via ALTER TABLE ADD COLUMN
-    - Rebuilds table if needed
     """
     with conn() as c:
-        # 1) Create base table (new installs)
+        # Base create (new installs) — includes created_at/updated_at
         c.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -79,19 +87,19 @@ def ensure_schema_and_migrate() -> None:
                 start_date TEXT,
                 due_date TEXT,
                 plainsware_project TEXT DEFAULT 'No',
-                plainsware_number INTEGER
+                plainsware_number INTEGER,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
         c.commit()
 
-        # 2) Introspect existing columns
         info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
         existing_cols = info["name"].tolist()
         existing_set = set(existing_cols)
 
-        # 3) Fix common legacy/typo column names
-        # SQLite supports ALTER TABLE RENAME COLUMN in modern versions. [3](https://predictivehacks.com/creating-dynamic-forms-with-streamlit-a-step-by-step-guide/)[4](https://stackoverflow.com/questions/73049262/update-value-for-selectbox-in-streamlit-in-real-time)[5](https://github.com/streamlit/streamlit/issues/9030)
+        # Rename legacy typo columns if present (SQLite supports RENAME COLUMN in modern versions) [5](https://www.reddit.com/r/StreamlitOfficial/comments/11osmje/scriptrunnerscript_runnerpy_line_565_in_run/)[6](https://github.com/streamlit/streamlit/issues/252)
         if "plainsware_proj" in existing_set and "plainsware_project" not in existing_set:
             try:
                 c.execute(
@@ -110,18 +118,19 @@ def ensure_schema_and_migrate() -> None:
             except Exception:
                 _rebuild_projects_table(c)
 
-        # Refresh after potential rename
+        # Refresh after rename attempt
         info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
         existing_cols = info["name"].tolist()
         existing_set = set(existing_cols)
 
-        # 4) Add missing columns safely
+        # Add missing columns
         for col, ddl in EXPECTED_COLUMNS.items():
             if col not in existing_set:
-                # Avoid adding required NOT NULL without default via ALTER
+                # Avoid adding required NOT NULL columns without default via ALTER TABLE
                 if col in ("id", "name", "pillar"):
                     continue
                 try:
+                    # SQLite ADD COLUMN appends at end [5](https://www.reddit.com/r/StreamlitOfficial/comments/11osmje/scriptrunnerscript_runnerpy_line_565_in_run/)[7](https://pythonium.net/linter)
                     c.execute(f"ALTER TABLE {TABLE} ADD COLUMN {col} {ddl}")
                 except Exception:
                     _rebuild_projects_table(c)
@@ -135,7 +144,6 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
     old_info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
     old_cols = old_info["name"].tolist()
 
-    # Map legacy typo names to correct ones during rebuild
     legacy_map = {
         "plainsware_proj": "plainsware_project",
         "plainsware_num": "plainsware_number",
@@ -143,6 +151,7 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
 
     keep_cols_old = []
     keep_cols_new = []
+
     for col in old_cols:
         if col == "id":
             continue
@@ -167,7 +176,9 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
             start_date TEXT,
             due_date TEXT,
             plainsware_project TEXT DEFAULT 'No',
-            plainsware_number INTEGER
+            plainsware_number INTEGER,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
@@ -234,7 +245,7 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
                 where.append(f"{col} = ?")
                 args.append(filters[col])
 
-        # NEW: Plainsware Yes/No filter
+        # Plainsware filter (All/Yes/No)
         if filters.get("plainsware") and filters["plainsware"] != ALL_LABEL:
             where.append("plainsware_project = ?")
             args.append(filters["plainsware"])
@@ -254,7 +265,7 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
     if where:
         q += " WHERE " + " AND ".join(where)
 
-    q += " ORDER BY COALESCE(start_date,''), COALESCE(due_date,'')"
+    q += " ORDER BY COALESCE(start_date,''), COALESCE(due_date,''), COALESCE(created_at,'')"
 
     with conn() as c:
         return pd.read_sql_query(q, c, params=args)
@@ -300,8 +311,10 @@ def build_pdf_report(df: pd.DataFrame, title: str = "Digital Portfolio Report") 
     c.drawString(40, height - 80, f"Rows: {len(df)}")
 
     cols = [
-        "id", "name", "pillar", "priority", "owner", "status", "start_date", "due_date",
-        "plainsware_project", "plainsware_number"
+        "id", "name", "pillar", "priority", "owner", "status",
+        "start_date", "due_date",
+        "plainsware_project", "plainsware_number",
+        "created_at", "updated_at",
     ]
     cols = [col for col in cols if col in df.columns]
 
@@ -339,13 +352,11 @@ if not os.path.exists(DB_PATH):
 
 
 # ------------------ Session State (safe reset pattern) ------------------
-# Streamlit disallows setting session_state for a widget key after the widget is created. [1](https://stackoverflow.com/questions/72548682/streamlit-run-file-name-py-syntaxerror-invalid-syntax)[2](https://engage.cloud.microsoft/main/threads/eyJfdHlwZSI6IlRocmVhZCIsImlkIjoiMzM2NDI2MjQ3OTg5NjU3NiJ9)
+# Streamlit disallows setting st.session_state[key] after widget with key is created. [3](https://jnj.sharepoint.com/teams/depuycork/ENG/pmo/_layouts/15/Doc.aspx?sourcedoc=%7B2589B626-467D-4C54-AFF7-10A08967FBAD%7D&file=Guidance%20for%20creating%20a%20NEW%20Planisware%20project.docx&action=default&mobileredirect=true&DefaultItemOpen=1)[4](https://jnj.sharepoint.com/teams/PMO/Team/planandcontrol/opplan/Project%20Documents/Resource_Allocation/Background_Documents/brochure_solution_p5_project_portfolio_management_0.pdf?web=1)
 if "project_selector" not in st.session_state:
     st.session_state.project_selector = NEW_LABEL
-
 if "reset_project_selector" not in st.session_state:
     st.session_state.reset_project_selector = False
-
 if st.session_state.reset_project_selector:
     st.session_state.project_selector = NEW_LABEL
     st.session_state.reset_project_selector = False
@@ -411,11 +422,9 @@ with st.form("project_form"):
     due_val = try_date(loaded_project.get("due_date")) if loaded_project else date.today()
     desc_val = loaded_project.get("description") if loaded_project else ""
 
-    # Plainsware defaults
     pw_val = loaded_project.get("plainsware_project", "No") if loaded_project else "No"
     pw_num_val = loaded_project.get("plainsware_number") if loaded_project else None
 
-    # LEFT
     with c1:
         project_name = st.text_input("Name*", value=name_val, key="editor_name")
 
@@ -442,7 +451,6 @@ with st.form("project_form"):
 
         description = st.text_area("Description", value=desc_val, height=120, key="editor_desc")
 
-    # RIGHT
     with c2:
         owner_options = owner_list[:] if owner_list else [""]
         owner_index = owner_options.index(owner_val) if owner_val in owner_options else None
@@ -503,7 +511,6 @@ def _clean(s: Any) -> str:
 
 if submitted_new:
     errors = []
-
     project_name_clean = _clean(project_name)
     project_pillar_clean = _clean(project_pillar)
     project_owner_clean = _clean(project_owner)
@@ -530,13 +537,15 @@ if submitted_new:
         st.error(" ".join(errors))
     else:
         try:
+            ts = now_ts()
             with conn() as c:
                 c.execute(
                     f"""
                     INSERT INTO {TABLE}
                     (name, pillar, priority, description, owner, status, start_date, due_date,
-                     plainsware_project, plainsware_number)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     plainsware_project, plainsware_number,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         project_name_clean,
@@ -549,6 +558,8 @@ if submitted_new:
                         to_iso(due_date),
                         plainsware_project,
                         pw_number_db,
+                        ts,
+                        ts,
                     ),
                 )
                 c.commit()
@@ -571,7 +582,6 @@ if submitted_update:
         st.warning("Select an existing project to update.")
     else:
         errors = []
-
         project_name_clean = _clean(project_name)
         project_pillar_clean = _clean(project_pillar)
         project_owner_clean = _clean(project_owner)
@@ -598,12 +608,14 @@ if submitted_update:
             st.error(" ".join(errors))
         else:
             try:
+                ts = now_ts()
                 with conn() as c:
                     c.execute(
                         f"""
                         UPDATE {TABLE}
                         SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?,
-                            plainsware_project=?, plainsware_number=?
+                            plainsware_project=?, plainsware_number=?,
+                            updated_at=?
                         WHERE id=?
                         """,
                         (
@@ -617,6 +629,7 @@ if submitted_update:
                             to_iso(due_date),
                             plainsware_project,
                             pw_number_db,
+                            ts,
                             int(loaded_project["id"]),
                         ),
                     )
@@ -654,7 +667,6 @@ if submitted_delete:
 st.markdown("---")
 st.subheader("Filters")
 
-# Added one more column for Plainsware filter
 colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
 
 pillars = [ALL_LABEL] + distinct_values("pillar")
@@ -674,8 +686,7 @@ plainsware_opts = [ALL_LABEL, "Yes", "No"]
 pillar_f = colF1.selectbox("Pillar", pillars, key="pillar_f")
 status_f = colF2.selectbox("Status", statuses, key="status_f")
 owner_f = colF3.selectbox("Owner", owners, key="owner_f")
-priority_f = colF4.selectbox("Priority", priority_opts, key="priority_f")
-plainsware_f = colF5.selectbox("Plainsware", plainsware_opts, key="plainsware_f")
+priority_f = colF4.selectbox("Priority", priority_opts, key="_f = colF5.selectbox("Plainsware", plainsware_opts, key="plainsware_f")
 search_f = colF6.text_input("Search", key="search_f")
 
 filters = dict(
@@ -683,7 +694,7 @@ filters = dict(
     status=status_f,
     owner=owner_f,
     priority=priority_f,
-    plainsware=plainsware_f,   # NEW
+    plainsware=plainsware_f,
     search=search_f,
 )
 
@@ -790,12 +801,8 @@ if show_roadmap:
 
     if not gantt.empty:
         roadmap_fig = px.timeline(
-            gantt,
-            x_start="Start",
-            x_end="Finish",
-            y="name",
-            color="pillar",
-            title="Project Timeline",
+            gantt, x_start="Start", x_end="Finish", y="name", color="pillar",
+            title="Project Timeline"
         )
         roadmap_fig.update_yaxes(autorange="reversed")
         st.plotly_chart(roadmap_fig, use_container_width=True)
