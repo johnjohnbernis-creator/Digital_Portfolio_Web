@@ -433,8 +433,10 @@ if st.session_state.reset_project_selector:
 
 # ------------------ FIX: Clear Filters callback ------------------
 def reset_filters():
-    """
-    Reset filter widgets by assigning default values (more reliable than deleting keys). [1](https://jnj.sharepoint.com/teams/EthiconGACampusEngineering/_layouts/15/Doc.aspx?sourcedoc=%7BCAA20D3F-7AA8-4864-A11A-CAFAD07424C3%7D&file=XXXXXXXXX%20CSV%20for%20Monofilament%20Prolene%20Extruder%20Line6_12042025%20-%20Original.docx&action=default&mobileredirect=true&DefaultItemOpen=1)[2](https://jnj.sharepoint.com/teams/ITAS_GSD_Team/Shared%20Documents/EAS%20Team%20LTIM/Compliance/Infobelt/OAM%20User%20Guide%20-v2.pdf?web=1
+    """Reset filter widgets back to defaults.
+
+    Resets filter widgets by assigning default values
+    (more reliable than deleting keys).
     """
     st.session_state["pillar_f"] = ALL_LABEL
     st.session_state["status_f"] = ALL_LABEL
@@ -442,9 +444,9 @@ def reset_filters():
     st.session_state["priority_f"] = ALL_LABEL
     st.session_state["plainsware_f"] = ALL_LABEL
     st.session_state["search_f"] = ""
-    st.toast("Cleared filters.", icon="✅")
-    st.rerun()  # rerun is the recommended way vs experimental_rerun [3](https://stackoverflow.com/questions/73049262/update-value-for-selectbox-in-streamlit-in-real-time)
 
+    st.toast("Cleared filters.", icon="✅")
+    st.rerun()  # Recommended over experimental_rerun
 
 # ------------------ Project Editor ------------------
 st.markdown("---")
