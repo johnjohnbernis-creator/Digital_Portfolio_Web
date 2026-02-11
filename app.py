@@ -124,7 +124,6 @@ def _table_info_df(c: sqlite3.Connection) -> pd.DataFrame:
 
 
 def _needs_rebuild_due_to_created_at(info: pd.DataFrame) -> bool:
-    """Rebuild if created_at exists and is NOT NULL but has no default."""
     if info.empty:
         return False
     row = info[info["name"] == "created_at"]
@@ -137,13 +136,6 @@ def _needs_rebuild_due_to_created_at(info: pd.DataFrame) -> bool:
 
 
 def ensure_schema_and_migrate() -> None:
-    """
-    Ensure the projects table exists and includes required columns.
-    - Creates table if missing
-    - Renames legacy typo columns
-    - Rebuilds table when constraints would break inserts
-    - Adds missing columns
-    """
     with conn() as c:
         c.execute(
             f"""
@@ -171,10 +163,10 @@ def ensure_schema_and_migrate() -> None:
         c.commit()
 
         info = _table_info_df(c)
-        existing_set = set(info["name"].tolist())
+        existing = set(info["name"].tolist())
 
         # Rename legacy columns
-        if "plainsware_proj" in existing_set and "plainsware_project" not in existing_set:
+        if "plainsware_proj" in existing and "plainsware_project" not in existing:
             try:
                 c.execute(
                     f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_proj" TO "plainsware_project"'
@@ -183,7 +175,7 @@ def ensure_schema_and_migrate() -> None:
             except Exception:
                 _rebuild_projects_table(c)
 
-        if "plainsware_num" in existing_set and "plainsware_number" not in existing_set:
+        if "plainsware_num" in existing and "plainsware_number" not in existing:
             try:
                 c.execute(
                     f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_num" TO "plainsware_number"'
@@ -193,27 +185,15 @@ def ensure_schema_and_migrate() -> None:
                 _rebuild_projects_table(c)
 
         info = _table_info_df(c)
-        existing_set = set(info["name"].tolist())
+        existing = set(info["name"].tolist())
 
         if _needs_rebuild_due_to_created_at(info):
             _rebuild_projects_table(c)
             info = _table_info_df(c)
-            existing_set = set(info["name"].tolist())
-
-        extra_notnull = info[
-            (~info["name"].isin(EXPECTED_COLUMNS.keys()))
-            & (info["notnull"] == 1)
-            & (info["dflt_value"].isna())
-        ]
-        if not extra_notnull.empty:
-            _rebuild_projects_table(c)
-            info = _table_info_df(c)
-            existing_set = set(info["name"].tolist())
+            existing = set(info["name"].tolist())
 
         for col, ddl in EXPECTED_COLUMNS.items():
-            if col not in existing_set:
-                if col in ("id", "name", "pillar"):
-                    continue
+            if col not in existing and col not in ("id", "name", "pillar"):
                 try:
                     c.execute(f"ALTER TABLE {TABLE} ADD COLUMN {col} {ddl}")
                 except Exception:
@@ -224,7 +204,6 @@ def ensure_schema_and_migrate() -> None:
 
 
 def _rebuild_projects_table(c: sqlite3.Connection) -> None:
-    """Rebuild projects table to match expected schema."""
     old_info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
     old_cols = old_info["name"].tolist()
 
@@ -290,12 +269,9 @@ def _rebuild_projects_table(c: sqlite3.Connection) -> None:
     c.execute("COMMIT")
 
 
-# ---------- Validation Helpers ----------
+# ------------------ Validation ------------------
 
 def validate_plainsware(plainsware_project: str, plainsware_number: Any) -> None:
-    """
-    Enforce: If Planisware = Yes, a manual Planisware number is required.
-    """
     if str(plainsware_project).strip().lower() == "yes":
         if plainsware_number in (None, "", 0):
             raise ValueError(
@@ -303,7 +279,7 @@ def validate_plainsware(plainsware_project: str, plainsware_number: Any) -> None
             )
 
 
-# ---------- Misc Helpers ----------
+# ------------------ Misc Helpers ------------------
 
 def to_iso(d: Optional[date]) -> str:
     return d.strftime("%Y-%m-%d") if d else ""
@@ -326,6 +302,80 @@ def safe_index(options: List[str], val: Optional[str], default: int = 0) -> int:
         pass
     return default
 
+
+@st.cache_data(show_spinner=False)
+def distinct_values(col: str) -> List[str]:
+    with conn() as c:
+        df = pd.read_sql_query(
+            f"""
+            SELECT DISTINCT {col}
+            FROM {TABLE}
+            WHERE {col} IS NOT NULL AND TRIM({col}) <> ''
+            ORDER BY {col}
+            """,
+            c,
+        )
+    return df[col].dropna().astype(str).tolist()
+
+
+def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    q = f"SELECT * FROM {TABLE}"
+    args, where = [], []
+
+    if filters:
+        for col in ["pillar", "status", "owner"]:
+            if filters.get(col) and filters[col] != ALL_LABEL:
+                where.append(f"{col} = ?")
+                args.append(filters[col])
+
+        if filters.get("plainsware") and filters["plainsware"] != ALL_LABEL:
+            where.append("plainsware_project = ?")
+            args.append(filters["plainsware"])
+
+        if filters.get("priority") and filters["priority"] != ALL_LABEL:
+            where.append("priority = ?")
+            try:
+                args.append(int(filters["priority"]))
+            except Exception:
+                where.pop()
+
+        if filters.get("search"):
+            s = f"%{filters['search'].lower()}%"
+            where.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
+            args.extend([s, s])
+
+    if where:
+        q += " WHERE " + " AND ".join(where)
+
+    q += " ORDER BY COALESCE(start_date,''), COALESCE(due_date,''), COALESCE(created_at,'')"
+
+    with conn() as c:
+        return pd.read_sql_query(q, c, params=args)
+
+
+def fetch_all_projects() -> pd.DataFrame:
+    with conn() as c:
+        return pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY id", c)
+
+
+def status_to_state(x: Any) -> str:
+    s = str(x).strip().lower()
+    return "Completed" if s in {"done", "complete", "completed"} else "Ongoing"
+
+
+def safe_int(x: Any, default: int = 5) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+
+def clear_cached_lists() -> None:
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+``
 
 # ------------------ App Boot ------------------
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
