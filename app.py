@@ -1,8 +1,10 @@
 # ----------------------------------------------------------
 # Digital Portfolio — Web Version (Portfolio App)
 # Planisware logic aligned with Digital Product app:
-#   - plainsware_number stored as TEXT (JJMD-0079575)
-#   - conditional text input and regex validation
+#  - plainsware_number stored as TEXT (JJMD-0079575)
+#  - conditional text input + regex validation
+#  - migration: rebuild table if plainsware_number is INTEGER
+#  - Clear Filters works (no rerun inside callback)
 # ----------------------------------------------------------
 
 import os
@@ -41,30 +43,27 @@ ALL_LABEL = "All"
 def now_ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# ------------------ Planisware / JJMD validation ------------------
+# ------------------ JJMD / Planisware validation ------------------
 import re
 JJMD_PATTERN = re.compile(r"^JJMD-\d{7}$", re.IGNORECASE)
 
-def validate_plainsware(plainsware_project: str, plainsware_number: Any) -> Optional"""
+def validate_plainsware(plainsware_project: str, plainsware_number: Any) -> Optional[str]:
+    """
     If Plainsware Project = Yes, user must manually enter a Planisware number
     in the format JJMD-0079575 (JJMD- + 7 digits).
 
-    Returns normalized value (uppercase) or None if Plainsware Project = No.
+    Returns normalized JJMD string (uppercase) or None if Plainsware Project = No.
     """
     if str(plainsware_project).strip().lower() == "yes":
         if plainsware_number is None or not str(plainsware_number).strip():
             raise ValueError("Planisware Project Number is required when Plainsware Project is Yes.")
-
         value = str(plainsware_number).strip().upper()
-
         if not JJMD_PATTERN.fullmatch(value):
             raise ValueError("Planisware Project Number must be in the format JJMD-0079575 (JJMD- + 7 digits).")
-
         return value
-
     return None
 
-# ✅ IMPORTANT CHANGE: plainsware_number is TEXT now
+# ✅ IMPORTANT CHANGE: plainsware_number is TEXT (supports JJMD-0079575)
 EXPECTED_COLUMNS = {
     "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
     "name": "TEXT NOT NULL",
@@ -75,12 +74,8 @@ EXPECTED_COLUMNS = {
     "status": "TEXT",
     "start_date": "TEXT",
     "due_date": "TEXT",
-
-    # Plainsware
     "plainsware_project": "TEXT DEFAULT 'No'",
-    "plainsware_number": "TEXT",     # <-- CHANGED TO TEXT
-
-    # Timestamps
+    "plainsware_number": "TEXT",  # <-- CHANGED from INTEGER to TEXT
     "created_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
     "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
 }
@@ -203,7 +198,7 @@ def ensure_schema_and_migrate() -> None:
         info = _table_info_df(c)
         existing_set = set(info["name"].tolist())
 
-        # Rename legacy typo columns
+        # Rename legacy typo columns if present
         if "plainsware_proj" in existing_set and "plainsware_project" not in existing_set:
             try:
                 c.execute(f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_proj" TO "plainsware_project"')
@@ -220,18 +215,19 @@ def ensure_schema_and_migrate() -> None:
 
         info = _table_info_df(c)
 
-        # Rebuild for created_at default issues
+        # Fix created_at default issues
         if _needs_rebuild_due_to_created_at(info):
             _rebuild_projects_table(c)
             info = _table_info_df(c)
 
-        # Rebuild if plainsware_number is INTEGER in older DB
+        # Fix plainsware_number type (INTEGER -> TEXT)
         if _needs_rebuild_due_to_plainsware_number_type(info):
             _rebuild_projects_table(c)
             info = _table_info_df(c)
 
         existing_set = set(info["name"].tolist())
 
+        # Add any missing columns
         for col, ddl in EXPECTED_COLUMNS.items():
             if col not in existing_set and col not in ("id", "name", "pillar"):
                 try:
@@ -261,6 +257,19 @@ def safe_index(options: List[str], val: Optional[str], default: int = 0) -> int:
     except Exception:
         pass
     return default
+
+def safe_int(x: Any, default: int = 5) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+def status_to_state(x: Any) -> str:
+    s = str(x).strip().lower()
+    return "Completed" if s in {"done", "complete", "completed"} else "Ongoing"
+
+def _clean(s: Any) -> str:
+    return (s or "").strip()
 
 @st.cache_data(show_spinner=False)
 def distinct_values(col: str) -> List[str]:
@@ -314,24 +323,44 @@ def fetch_all_projects() -> pd.DataFrame:
     with conn() as c:
         return pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY id", c)
 
-def status_to_state(x: Any) -> str:
-    s = str(x).strip().lower()
-    return "Completed" if s in {"done", "complete", "completed"} else "Ongoing"
-
-def safe_int(x: Any, default: int = 5) -> int:
-    try:
-        return int(x)
-    except Exception:
-        return default
-
-def clear_cached_lists() -> None:
+def clear_cache() -> None:
     try:
         st.cache_data.clear()
     except Exception:
         pass
 
-def _clean(s: Any) -> str:
-    return (s or "").strip()
+# ------------------ PDF Export ------------------
+def build_pdf_report(df: pd.DataFrame, title: str = "Report") -> bytes:
+    if not REPORTLAB_AVAILABLE:
+        return b""
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=letter)
+    width, height = letter
+
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(40, height - 40, title)
+
+    c.setFont("Helvetica", 9)
+    y = height - 70
+
+    cols = ["id", "name", "pillar", "priority", "owner", "status",
+            "start_date", "due_date", "plainsware_project", "plainsware_number"]
+    c.drawString(40, y, " | ".join(cols))
+    y -= 14
+
+    for _, row in df.iterrows():
+        line = " | ".join([str(row.get(col, ""))[:40] for col in cols])
+        c.drawString(40, y, line)
+        y -= 12
+        if y < 50:
+            c.showPage()
+            c.setFont("Helvetica", 9)
+            y = height - 50
+
+    c.save()
+    pdf = buffer.getvalue()
+    buffer.close()
+    return pdf
 
 # ------------------ App Boot ------------------
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
@@ -380,14 +409,13 @@ owner_list = distinct_values("owner")
 
 bcol1, bcol2 = st.columns([1, 1])
 new_clicked = bcol1.button("New", key="btn_new_project")
-
-# ✅ Clear Filters button (WORKING pattern: no rerun inside callback)
 clear_clicked = bcol2.button("Clear Filters", key="btn_clear_filters")
 
 if new_clicked:
     st.session_state.reset_project_selector = True
     st.rerun()
 
+# ✅ Clear Filters that actually works (no rerun inside callback)
 if clear_clicked:
     st.session_state.update({
         "pillar_f": ALL_LABEL,
@@ -397,7 +425,10 @@ if clear_clicked:
         "plainsware_f": ALL_LABEL,
         "search_f": "",
     })
-    st.toast("Cleared filters.", icon="✅")
+    try:
+        st.toast("Cleared filters.", icon="✅")
+    except Exception:
+        st.success("Cleared filters.")
     st.rerun()
 
 # ------------------ Form (Entry) ------------------
@@ -473,7 +504,7 @@ with st.form("project_form"):
             key="editor_plainsware_project",
         )
 
-        # ✅ JJMD textbox (same as Digital Product)
+        # ✅ JJMD text input (same as product app)
         plainsware_number = None
         if plainsware_project == "Yes":
             default_num = str(pw_num_val).strip() if pw_num_val is not None else ""
@@ -483,8 +514,6 @@ with st.form("project_form"):
                 placeholder="JJMD-0079575",
                 key="editor_plainsware_number",
             )
-
-            # non-blocking warning (hard validation occurs on save/update)
             if plainsware_number.strip() and not JJMD_PATTERN.fullmatch(plainsware_number.strip()):
                 st.warning("Format must be JJMD-0079575 (JJMD- + 7 digits).")
         else:
@@ -514,15 +543,15 @@ if submitted_new:
     pw_number_db = None
     if plainsware_project == "Yes":
         try:
-            pw_number_db = validate_plainsware(plainsware_project, plainsware_number)  # returns JJMD string
+            pw_number_db = validate_plainsware(plainsware_project, plainsware_number)
         except Exception as e:
             errors.append(str(e))
 
     if errors:
         st.error(" ".join(errors))
     else:
+        ts = now_ts()
         try:
-            ts = now_ts()
             with conn() as c:
                 c.execute(
                     f"""
@@ -549,16 +578,13 @@ if submitted_new:
                 )
                 c.commit()
 
-            clear_cached_lists()
+            clear_cache()
             st.success("✅ Project created successfully!")
             st.session_state.reset_project_selector = True
             st.rerun()
 
-        except sqlite3.IntegrityError as e:
-            st.error(f"SQLite IntegrityError: {e}")
-            st.stop()
         except Exception as e:
-            st.error(f"Unexpected save error: {e}")
+            st.error(f"Save error: {e}")
             st.stop()
 
 if submitted_update:
@@ -589,8 +615,8 @@ if submitted_update:
         if errors:
             st.error(" ".join(errors))
         else:
+            ts = now_ts()
             try:
-                ts = now_ts()
                 with conn() as c:
                     c.execute(
                         f"""
@@ -617,15 +643,12 @@ if submitted_update:
                     )
                     c.commit()
 
-                clear_cached_lists()
+                clear_cache()
                 st.success("✅ Project updated!")
                 st.rerun()
 
-            except sqlite3.IntegrityError as e:
-                st.error(f"SQLite IntegrityError: {e}")
-                st.stop()
             except Exception as e:
-                st.error(f"Unexpected update error: {e}")
+                st.error(f"Update error: {e}")
                 st.stop()
 
 if submitted_delete:
@@ -636,17 +659,12 @@ if submitted_delete:
             with conn() as c:
                 c.execute(f"DELETE FROM {TABLE} WHERE id=?", (int(loaded_project["id"]),))
                 c.commit()
-
-            clear_cached_lists()
+            clear_cache()
             st.warning("Project deleted.")
             st.session_state.reset_project_selector = True
             st.rerun()
-
-        except sqlite3.IntegrityError as e:
-            st.error(f"SQLite IntegrityError: {e}")
-            st.stop()
         except Exception as e:
-            st.error(f"Unexpected delete error: {e}")
+            st.error(f"Delete error: {e}")
             st.stop()
 
 # ------------------ Global Filters ------------------
@@ -818,5 +836,37 @@ st.download_button(
     key="export_csv_full_db",
 )
 
-# PDF export (optional) - keep your existing build_pdf_report if you use it
-# Roadmap export (optional) - keep your existing code if you use it
+if REPORTLAB_AVAILABLE:
+    pdf_bytes = build_pdf_report(data, title="Digital Portfolio Report (Filtered)")
+    st.download_button(
+        "🖨️ Download Printable Report (PDF)",
+        data=pdf_bytes,
+        file_name="portfolio_report_filtered.pdf",
+        mime="application/pdf",
+        key="export_pdf_filtered",
+    )
+
+if roadmap_fig is not None:
+    st.markdown("---")
+    st.subheader("Export Roadmap")
+
+    st.download_button(
+        "🌐 Download Roadmap (Interactive HTML)",
+        data=roadmap_fig.to_html(include_plotlyjs="cdn"),
+        file_name="roadmap.html",
+        mime="text/html",
+        key="export_roadmap_html",
+    )
+
+    if KALEIDO_AVAILABLE:
+        try:
+            img_bytes = pio.to_image(roadmap_fig, format="png", scale=2)
+            st.download_button(
+                "📸 Download Roadmap (PNG)",
+                data=img_bytes,
+                file_name="roadmap.png",
+                mime="image/png",
+                key="export_roadmap_png",
+            )
+        except Exception as e:
+            st.info(f"PNG export unavailable in this runtime: {e}")
