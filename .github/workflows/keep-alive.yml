@@ -2,8 +2,8 @@ name: SQLite Cloud Keep Alive
 
 on:
   schedule:
-    - cron: "0 */4 * * *"   # every 4 hours
-  workflow_dispatch:        # allows manual run
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
 
 jobs:
   keep-alive:
