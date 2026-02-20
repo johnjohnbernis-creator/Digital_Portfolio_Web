@@ -430,7 +430,18 @@ if clear_clicked:
     except Exception:
         st.success("Cleared filters.")
     st.rerun()
+def assert_db_awake():
+    try:
+        with conn() as c:
+            c.execute("SELECT 1")
+    except Exception:
+        st.error(
+            "🚨 Database is paused or unavailable.\n\n"
+            "Please wake up the SQLite Cloud project."
+        )
+        st.stop()
 
+assert_db_awake()
 # ------------------ Form (Entry) ------------------
 with st.form("project_form"):
     c1, c2 = st.columns(2)
