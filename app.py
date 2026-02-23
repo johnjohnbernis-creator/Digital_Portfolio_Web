@@ -1,24 +1,25 @@
 # ----------------------------------------------------------
 # Digital Portfolio — Web Version (Portfolio App)
-# SQLite Cloud version (persistent)
-# - Uses sqlitecloud driver (sqlite3-compatible DB-API) [1](https://docs.sqlitecloud.io/docs/sdk-python-introduction)[2](https://github.com/sqlitecloud/sqlitecloud-py)
-# - Removes local portfolio.db (ephemeral on Streamlit Cloud)
-# - Keeps Planisware validation + schema migration
-# - Removes explicit commit() (sqlitecloud autocommit is always on) [2](https://github.com/sqlitecloud/sqlitecloud-py)
+# ✅ Persistent SQLite Cloud version
+# - Uses sqlitecloud driver (sqlite3-compatible DB-API) [1](https://jnj.sharepoint.com/sites/PHM-GCSP-JSC/campuses/Beerse/Ipro6/ProjectPortfolioManagement?web=1)[2](https://jnj-my.sharepoint.com/personal/jbernis_its_jnj_com/Documents/Forms/DispForm.aspx?ID=146328&web=1)
+# - No local portfolio.db (Streamlit Cloud filesystem is ephemeral)
+# - Uses DB-in-path connection string: ...:8860/Portfolio?apikey=... [1](https://jnj.sharepoint.com/sites/PHM-GCSP-JSC/campuses/Beerse/Ipro6/ProjectPortfolioManagement?web=1)
+# - Keeps Planisware validation + schema migration logic
 # ----------------------------------------------------------
 
 import io
+from contextlib import contextmanager
 from datetime import datetime, date
 from typing import List, Dict, Optional, Any
+from urllib.parse import urlparse, parse_qs
 
 import pandas as pd
 import plotly.express as px
 import plotly.io as pio
 import streamlit as st
-import sqlitecloud  # ✅ SQLite Cloud DB-API driver [1](https://docs.sqlitecloud.io/docs/sdk-python-introduction)[2](https://github.com/sqlitecloud/sqlitecloud-py)
+import sqlitecloud  # SQLite Cloud Python SDK [1](https://jnj.sharepoint.com/sites/PHM-GCSP-JSC/campuses/Beerse/Ipro6/ProjectPortfolioManagement?web=1)[2](https://jnj-my.sharepoint.com/personal/jbernis_its_jnj_com/Documents/Forms/DispForm.aspx?ID=146328&web=1)
 
 # ------------------ Optional dependencies ------------------
-# PDF (ReportLab)
 try:
     from reportlab.lib.pagesizes import letter
     from reportlab.pdfgen import canvas
@@ -26,7 +27,6 @@ try:
 except Exception:
     REPORTLAB_AVAILABLE = False
 
-# Plotly static image export (Kaleido + Chrome typically required)
 try:
     import kaleido  # noqa: F401
     KALEIDO_AVAILABLE = True
@@ -41,6 +41,58 @@ ALL_LABEL = "All"
 def now_ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+# ------------------ Safe URL masking for UI/debug ------------------
+def _mask_url(url: str) -> str:
+    try:
+        u = urlparse(url)
+        q = parse_qs(u.query)
+        if "apikey" in q:
+            q["apikey"] = ["****"]
+        masked_query = "&".join([f"{k}={v[0]}" for k, v in q.items()])
+        return f"{u.scheme}://{u.netloc}{u.path}" + (f"?{masked_query}" if masked_query else "")
+    except Exception:
+        return "****"
+
+def _get_sqlitecloud_url() -> str:
+    url = (st.secrets.get("SQLITECLOUD_URL") or "").strip()
+    if not url:
+        st.error("Missing Streamlit secret: SQLITECLOUD_URL (Manage app → Settings → Secrets).")
+        st.stop()
+    if "YOUR_REAL_API_KEY" in url:
+        st.error("SQLITECLOUD_URL still contains placeholder YOUR_REAL_API_KEY. Paste the real API key into Streamlit Secrets.")
+        st.caption(f"Current: {_mask_url(url)}")
+        st.stop()
+    return url
+
+# ------------------ SQLite Cloud Connection (context manager) ------------------
+@contextmanager
+def conn():
+    """
+    Open/close a SQLite Cloud connection.
+    sqlitecloud aims for sqlite3 API compatibility (PEP 249-style) [1](https://jnj.sharepoint.com/sites/PHM-GCSP-JSC/campuses/Beerse/Ipro6/ProjectPortfolioManagement?web=1)[2](https://jnj-my.sharepoint.com/personal/jbernis_its_jnj_com/Documents/Forms/DispForm.aspx?ID=146328&web=1)
+    """
+    url = _get_sqlitecloud_url()
+    c = sqlitecloud.connect(url)
+    try:
+        yield c
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+def assert_db_awake():
+    """Fail fast with the real exception (masked URL shown)."""
+    url = (st.secrets.get("SQLITECLOUD_URL") or "").strip()
+    try:
+        with conn() as c:
+            c.execute("SELECT 1")
+    except Exception as e:
+        st.error("🚨 Database unavailable.")
+        st.caption(f"Connection: {_mask_url(url)}")
+        st.exception(e)
+        st.stop()
+
 # ------------------ JJMD / Planisware validation ------------------
 import re
 JJMD_PATTERN = re.compile(r"^JJMD-\d{7}$", re.IGNORECASE)
@@ -49,7 +101,6 @@ def validate_plainsware(plainsware_project: str, plainsware_number: Any) -> Opti
     """
     If Plainsware Project = Yes, user must manually enter a Planisware number
     in the format JJMD-0079575 (JJMD- + 7 digits).
-    Returns normalized JJMD string (uppercase) or None if Plainsware Project = No.
     """
     if str(plainsware_project).strip().lower() == "yes":
         if plainsware_number is None or not str(plainsware_number).strip():
@@ -60,7 +111,7 @@ def validate_plainsware(plainsware_project: str, plainsware_number: Any) -> Opti
         return value
     return None
 
-# ✅ IMPORTANT CHANGE: plainsware_number is TEXT (supports JJMD-0079575)
+# ✅ IMPORTANT: plainsware_number is TEXT
 EXPECTED_COLUMNS = {
     "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
     "name": "TEXT NOT NULL",
@@ -77,23 +128,11 @@ EXPECTED_COLUMNS = {
     "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
 }
 
-# ------------------ DB / Utility Helpers ------------------
-def conn():
-    """
-    Open a connection to SQLite Cloud using Streamlit secrets.
-    sqlitecloud aims to be sqlite3-API compatible. [1](https://docs.sqlitecloud.io/docs/sdk-python-introduction)[2](https://github.com/sqlitecloud/sqlitecloud-py)
-    """
-    url = st.secrets.get("SQLITECLOUD_URL", "").strip()
-    if not url:
-        st.error("Missing Streamlit secret SQLITECLOUD_URL. Add it in Manage app → Settings → Secrets.")
-        st.stop()
-    return sqlitecloud.connect(url)
-
+# ------------------ Schema / Migration Helpers ------------------
 def _table_info_df(c) -> pd.DataFrame:
     return pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
 
 def _needs_rebuild_due_to_created_at(info: pd.DataFrame) -> bool:
-    """Rebuild if created_at exists and is NOT NULL but has no default."""
     if info.empty:
         return False
     row = info[info["name"] == "created_at"]
@@ -105,7 +144,6 @@ def _needs_rebuild_due_to_created_at(info: pd.DataFrame) -> bool:
     return bool(notnull and no_default)
 
 def _needs_rebuild_due_to_plainsware_number_type(info: pd.DataFrame) -> bool:
-    """Rebuild if plainsware_number exists but is not TEXT (old DB may have INTEGER)."""
     if info.empty:
         return False
     row = info[info["name"] == "plainsware_number"]
@@ -115,7 +153,6 @@ def _needs_rebuild_due_to_plainsware_number_type(info: pd.DataFrame) -> bool:
     return col_type != "TEXT"
 
 def _rebuild_projects_table(c) -> None:
-    """Rebuild projects table to match expected schema (including TEXT plainsware_number)."""
     old_info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
     old_cols = old_info["name"].tolist()
 
@@ -135,6 +172,7 @@ def _rebuild_projects_table(c) -> None:
             keep_old.append(col)
             keep_new.append(legacy_map[col])
 
+    # Use explicit transaction SQL; sqlitecloud supports executing SQL commands
     c.execute("BEGIN")
     c.execute(
         f"""
@@ -177,7 +215,6 @@ def _rebuild_projects_table(c) -> None:
     c.execute("COMMIT")
 
 def ensure_schema_and_migrate() -> None:
-    """Ensure the projects table exists and includes required columns."""
     with conn() as c:
         c.execute(
             f"""
@@ -202,7 +239,7 @@ def ensure_schema_and_migrate() -> None:
         info = _table_info_df(c)
         existing_set = set(info["name"].tolist())
 
-        # Rename legacy typo columns if present
+        # Rename legacy columns if present
         if "plainsware_proj" in existing_set and "plainsware_project" not in existing_set:
             try:
                 c.execute(f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_proj" TO "plainsware_project"')
@@ -217,19 +254,17 @@ def ensure_schema_and_migrate() -> None:
 
         info = _table_info_df(c)
 
-        # Fix created_at default issues
         if _needs_rebuild_due_to_created_at(info):
             _rebuild_projects_table(c)
             info = _table_info_df(c)
 
-        # Fix plainsware_number type (INTEGER -> TEXT)
         if _needs_rebuild_due_to_plainsware_number_type(info):
             _rebuild_projects_table(c)
             info = _table_info_df(c)
 
         existing_set = set(info["name"].tolist())
 
-        # Add any missing columns
+        # Add missing columns
         for col, ddl in EXPECTED_COLUMNS.items():
             if col not in existing_set and col not in ("id", "name", "pillar"):
                 try:
@@ -334,30 +369,30 @@ def build_pdf_report(df: pd.DataFrame, title: str = "Report") -> bytes:
     if not REPORTLAB_AVAILABLE:
         return b""
     buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=letter)
+    cpdf = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
 
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(40, height - 40, title)
+    cpdf.setFont("Helvetica-Bold", 14)
+    cpdf.drawString(40, height - 40, title)
 
-    c.setFont("Helvetica", 9)
+    cpdf.setFont("Helvetica", 9)
     y = height - 70
 
     cols = ["id", "name", "pillar", "priority", "owner", "status",
             "start_date", "due_date", "plainsware_project", "plainsware_number"]
-    c.drawString(40, y, " | ".join(cols))
+    cpdf.drawString(40, y, " | ".join(cols))
     y -= 14
 
     for _, row in df.iterrows():
         line = " | ".join([str(row.get(col, ""))[:40] for col in cols])
-        c.drawString(40, y, line)
+        cpdf.drawString(40, y, line)
         y -= 12
         if y < 50:
-            c.showPage()
-            c.setFont("Helvetica", 9)
+            cpdf.showPage()
+            cpdf.setFont("Helvetica", 9)
             y = height - 50
 
-    c.save()
+    cpdf.save()
     pdf = buffer.getvalue()
     buffer.close()
     return pdf
@@ -366,15 +401,10 @@ def build_pdf_report(df: pd.DataFrame, title: str = "Report") -> bytes:
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
 st.title("Digital Portfolio — Web Version")
 
-def assert_db_awake():
-    try:
-        with conn() as c:
-            c.execute("SELECT 1")
-    except Exception as e:
-        st.error("🚨 Database unavailable. Check SQLITECLOUD_URL / API key / project status.")
-        st.stop()
-
+# 1) Fail fast if secret/key/project is wrong
 assert_db_awake()
+
+# 2) Ensure schema in SQLite Cloud (persistent)
 ensure_schema_and_migrate()
 
 # ------------------ Session State ------------------
@@ -424,7 +454,6 @@ if new_clicked:
     st.session_state.reset_project_selector = True
     st.rerun()
 
-# Clear Filters
 if clear_clicked:
     st.session_state.update({
         "pillar_f": ALL_LABEL,
@@ -456,7 +485,6 @@ with st.form("project_form"):
     pw_val = loaded_project.get("plainsware_project", "No") if loaded_project else "No"
     pw_num_val = loaded_project.get("plainsware_number") if loaded_project else None
 
-    # LEFT
     with c1:
         project_name = st.text_input("Name*", value=name_val, key="editor_name")
 
@@ -483,7 +511,6 @@ with st.form("project_form"):
 
         description = st.text_area("Description", value=desc_val, height=120, key="editor_desc")
 
-    # RIGHT
     with c2:
         owner_options = owner_list[:] if owner_list else [""]
         owner_index = owner_options.index(owner_val) if owner_val in owner_options else None
