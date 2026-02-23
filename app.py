@@ -453,7 +453,8 @@ if selected_project != NEW_LABEL:
 pillar_from_db = distinct_values("pillar")
 pillar_options = sorted(set(PRESET_PILLARS) | set(pillar_from_db))
 
-status_list = distinct_values("status")
+status_from_db = distinct_values("status")
+status_list = sorted(set(PRESET_STATUSES) | set(status_from_db))
 owner_list = distinct_values("owner")
 
 bcol1, bcol2 = st.columns([1, 1])
