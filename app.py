@@ -316,6 +316,8 @@ def _clean(s: Any) -> str:
 
 pillar_from_db = distinct_values("pillar")
 pillar_options = sorted(set(PRESET_PILLARS) | set(pillar_from_db))
+   @st.cache_data(show_spinner=False)
+def distinct_values(col: str) -> List[str]:
     with conn() as c:
         df = pd.read_sql_query(
             f"""
@@ -326,6 +328,7 @@ pillar_options = sorted(set(PRESET_PILLARS) | set(pillar_from_db))
             """,
             c,
         )
+    return df[col].dropna().astype(str).tolist()
     return df[col].dropna().astype(str).tolist()
 
 def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
