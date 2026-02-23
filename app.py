@@ -34,6 +34,14 @@ except Exception:
     KALEIDO_AVAILABLE = False
 
 # ------------------ Constants ------------------
+PRESET_PILLARS = [
+    "Digital Mindset",
+    "Advanced Analytics",
+    "Integration & Visualization",
+    "Data Availability & Connectivity",
+    "Smart Operations",
+    "Process Excellence",
+]
 TABLE = "projects"
 NEW_LABEL = "<New Project>"
 ALL_LABEL = "All"
