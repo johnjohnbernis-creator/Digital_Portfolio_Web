@@ -46,7 +46,12 @@ PRESET_PILLARS = [
     "Smart Operations",
     "Process Excellence",
 ]
-
+PRESET_STATUSES = [
+    "Planned",
+    "In Progress",
+    "Completed",
+    "On Hold",
+]
 def now_ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
