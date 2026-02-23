@@ -1,10 +1,10 @@
 # ----------------------------------------------------------
 # Digital Portfolio — Web Version (Portfolio App)
 # ✅ Persistent SQLite Cloud version
-# - Uses sqlitecloud driver (sqlite3-compatible DB-API) [1](https://jnj.sharepoint.com/sites/PHM-GCSP-JSC/campuses/Beerse/Ipro6/ProjectPortfolioManagement?web=1)[2](https://jnj-my.sharepoint.com/personal/jbernis_its_jnj_com/Documents/Forms/DispForm.aspx?ID=146328&web=1)
-# - No local portfolio.db (Streamlit Cloud filesystem is ephemeral)
-# - Uses DB-in-path connection string: ...:8860/Portfolio?apikey=... [1](https://jnj.sharepoint.com/sites/PHM-GCSP-JSC/campuses/Beerse/Ipro6/ProjectPortfolioManagement?web=1)
-# - Keeps Planisware validation + schema migration logic
+# - No local DB file (Streamlit Cloud filesystem is ephemeral)  # see Streamlit docs note [1](https://jnj.sharepoint.com/sites/MAF_HUB/APAC/Integrated%20Evidence%20Generation%20Plan/_layouts/15/Doc.aspx?sourcedoc=%7B6C3453F0-2DB7-4A32-85E5-29659587E3E2%7D&file=OnTrac%20Regional%20Training%20Presentation_Evidence%20Dissemination%20and%20JPUBS%20Integration.pptx&action=edit&mobileredirect=true&DefaultItemOpen=1)
+# - Uses sqlitecloud (sqlite3-compatible DB-API style)          # [2](https://jnj.sharepoint.com/teams/WCHDigitalHub/SitePages/Da.aspx?web=1)[3](https://jnj.sharepoint.com/sites/JJSC-GCSP/departments/QC/ERO/Documents/ERO%20Reg%20Compliance%20Topic%20Archive/TGA_Medical%20device%20cyber%20security%20guidance%20for%20industry_July%202019.pdf?web=1)
+# - Uses DB-in-path connection string: ...:8860/Portfolio?apikey=...  # [2](https://jnj.sharepoint.com/teams/WCHDigitalHub/SitePages/Da.aspx?web=1)
+# - Adds PRESET_PILLARS merged with DB values (fixes "only one pillar")
 # ----------------------------------------------------------
 
 import io
@@ -17,7 +17,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.io as pio
 import streamlit as st
-import sqlitecloud  # SQLite Cloud Python SDK [1](https://jnj.sharepoint.com/sites/PHM-GCSP-JSC/campuses/Beerse/Ipro6/ProjectPortfolioManagement?web=1)[2](https://jnj-my.sharepoint.com/personal/jbernis_its_jnj_com/Documents/Forms/DispForm.aspx?ID=146328&web=1)
+import sqlitecloud
 
 # ------------------ Optional dependencies ------------------
 try:
@@ -34,6 +34,10 @@ except Exception:
     KALEIDO_AVAILABLE = False
 
 # ------------------ Constants ------------------
+TABLE = "projects"
+NEW_LABEL = "<New Project>"
+ALL_LABEL = "All"
+
 PRESET_PILLARS = [
     "Digital Mindset",
     "Advanced Analytics",
@@ -42,9 +46,6 @@ PRESET_PILLARS = [
     "Smart Operations",
     "Process Excellence",
 ]
-TABLE = "projects"
-NEW_LABEL = "<New Project>"
-ALL_LABEL = "All"
 
 def now_ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -67,7 +68,7 @@ def _get_sqlitecloud_url() -> str:
         st.error("Missing Streamlit secret: SQLITECLOUD_URL (Manage app → Settings → Secrets).")
         st.stop()
     if "YOUR_REAL_API_KEY" in url:
-        st.error("SQLITECLOUD_URL still contains placeholder YOUR_REAL_API_KEY. Paste the real API key into Streamlit Secrets.")
+        st.error("SQLITECLOUD_URL contains placeholder YOUR_REAL_API_KEY. Paste the real API key into Streamlit Secrets.")
         st.caption(f"Current: {_mask_url(url)}")
         st.stop()
     return url
@@ -77,7 +78,6 @@ def _get_sqlitecloud_url() -> str:
 def conn():
     """
     Open/close a SQLite Cloud connection.
-    sqlitecloud aims for sqlite3 API compatibility (PEP 249-style) [1](https://jnj.sharepoint.com/sites/PHM-GCSP-JSC/campuses/Beerse/Ipro6/ProjectPortfolioManagement?web=1)[2](https://jnj-my.sharepoint.com/personal/jbernis_its_jnj_com/Documents/Forms/DispForm.aspx?ID=146328&web=1)
     """
     url = _get_sqlitecloud_url()
     c = sqlitecloud.connect(url)
@@ -119,7 +119,7 @@ def validate_plainsware(plainsware_project: str, plainsware_number: Any) -> Opti
         return value
     return None
 
-# ✅ IMPORTANT: plainsware_number is TEXT
+# ✅ plainsware_number is TEXT
 EXPECTED_COLUMNS = {
     "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
     "name": "TEXT NOT NULL",
@@ -180,7 +180,6 @@ def _rebuild_projects_table(c) -> None:
             keep_old.append(col)
             keep_new.append(legacy_map[col])
 
-    # Use explicit transaction SQL; sqlitecloud supports executing SQL commands
     c.execute("BEGIN")
     c.execute(
         f"""
@@ -247,7 +246,6 @@ def ensure_schema_and_migrate() -> None:
         info = _table_info_df(c)
         existing_set = set(info["name"].tolist())
 
-        # Rename legacy columns if present
         if "plainsware_proj" in existing_set and "plainsware_project" not in existing_set:
             try:
                 c.execute(f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_proj" TO "plainsware_project"')
@@ -272,7 +270,6 @@ def ensure_schema_and_migrate() -> None:
 
         existing_set = set(info["name"].tolist())
 
-        # Add missing columns
         for col, ddl in EXPECTED_COLUMNS.items():
             if col not in existing_set and col not in ("id", "name", "pillar"):
                 try:
@@ -314,9 +311,7 @@ def status_to_state(x: Any) -> str:
 def _clean(s: Any) -> str:
     return (s or "").strip()
 
-pillar_from_db = distinct_values("pillar")
-pillar_options = sorted(set(PRESET_PILLARS) | set(pillar_from_db))
-   @st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def distinct_values(col: str) -> List[str]:
     with conn() as c:
         df = pd.read_sql_query(
@@ -328,7 +323,6 @@ def distinct_values(col: str) -> List[str]:
             """,
             c,
         )
-    return df[col].dropna().astype(str).tolist()
     return df[col].dropna().astype(str).tolist()
 
 def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
@@ -412,10 +406,7 @@ def build_pdf_report(df: pd.DataFrame, title: str = "Report") -> bytes:
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
 st.title("Digital Portfolio — Web Version")
 
-# 1) Fail fast if secret/key/project is wrong
 assert_db_awake()
-
-# 2) Ensure schema in SQLite Cloud (persistent)
 ensure_schema_and_migrate()
 
 # ------------------ Session State ------------------
@@ -453,7 +444,10 @@ if selected_project != NEW_LABEL:
     except Exception:
         loaded_project = None
 
-pillar_list = distinct_values("pillar")
+# ✅ Pillars: preset + any existing from DB
+pillar_from_db = distinct_values("pillar")
+pillar_options = sorted(set(PRESET_PILLARS) | set(pillar_from_db))
+
 status_list = distinct_values("status")
 owner_list = distinct_values("owner")
 
@@ -481,11 +475,14 @@ if clear_clicked:
     st.rerun()
 
 # ------------------ Form (Entry) ------------------
+st.markdown("---")
+st.subheader("Project Editor Form")
+
 with st.form("project_form"):
     c1, c2 = st.columns(2)
 
     name_val = loaded_project.get("name") if loaded_project else ""
-    pillar_val = loaded_project.get("pillar") if loaded_project else ""
+    pillar_val = loaded_project.get("pillar") if loaded_project else (pillar_options[0] if pillar_options else "")
     priority_val = int(loaded_project.get("priority", 5)) if loaded_project else 5
     owner_val = loaded_project.get("owner") if loaded_project else ""
     status_val = loaded_project.get("status") if loaded_project else ""
@@ -499,14 +496,11 @@ with st.form("project_form"):
     with c1:
         project_name = st.text_input("Name*", value=name_val, key="editor_name")
 
-        pillar_options = pillar_list[:] if pillar_list else [""]
-        pillar_index = pillar_options.index(pillar_val) if pillar_val in pillar_options else None
+        pillar_index = pillar_options.index(pillar_val) if pillar_val in pillar_options else 0
         project_pillar = st.selectbox(
             "Pillar*",
             options=pillar_options,
             index=pillar_index,
-            placeholder="Select or type a new pillar…",
-            accept_new_options=True,
             key="editor_pillar",
         )
 
@@ -524,13 +518,11 @@ with st.form("project_form"):
 
     with c2:
         owner_options = owner_list[:] if owner_list else [""]
-        owner_index = owner_options.index(owner_val) if owner_val in owner_options else None
+        owner_index = owner_options.index(owner_val) if owner_val in owner_options else 0
         project_owner = st.selectbox(
             "Owner*",
             options=owner_options,
             index=owner_index,
-            placeholder="Select or type a new owner…",
-            accept_new_options=True,
             key="editor_owner",
         )
 
@@ -727,7 +719,6 @@ try:
 except Exception:
     pass
 priority_opts = [ALL_LABEL] + [str(x) for x in priority_vals]
-
 plainsware_opts = [ALL_LABEL, "Yes", "No"]
 
 pillar_f = colF1.selectbox("Pillar", pillars, key="pillar_f")
