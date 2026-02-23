@@ -314,8 +314,8 @@ def status_to_state(x: Any) -> str:
 def _clean(s: Any) -> str:
     return (s or "").strip()
 
-@st.cache_data(show_spinner=False)
-def distinct_values(col: str) -> List[str]:
+pillar_from_db = distinct_values("pillar")
+pillar_options = sorted(set(PRESET_PILLARS) | set(pillar_from_db))
     with conn() as c:
         df = pd.read_sql_query(
             f"""
