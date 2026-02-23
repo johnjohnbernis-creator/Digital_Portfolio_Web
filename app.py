@@ -1,15 +1,13 @@
 # ----------------------------------------------------------
 # Digital Portfolio — Web Version (Portfolio App)
-# Planisware logic aligned with Digital Product app:
-#  - plainsware_number stored as TEXT (JJMD-0079575)
-#  - conditional text input + regex validation
-#  - migration: rebuild table if plainsware_number is INTEGER
-#  - Clear Filters works (no rerun inside callback)
+# SQLite Cloud version (persistent)
+# - Uses sqlitecloud driver (sqlite3-compatible DB-API) [1](https://docs.sqlitecloud.io/docs/sdk-python-introduction)[2](https://github.com/sqlitecloud/sqlitecloud-py)
+# - Removes local portfolio.db (ephemeral on Streamlit Cloud)
+# - Keeps Planisware validation + schema migration
+# - Removes explicit commit() (sqlitecloud autocommit is always on) [2](https://github.com/sqlitecloud/sqlitecloud-py)
 # ----------------------------------------------------------
 
-import os
 import io
-import sqlite3
 from datetime import datetime, date
 from typing import List, Dict, Optional, Any
 
@@ -17,6 +15,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.io as pio
 import streamlit as st
+import sqlitecloud  # ✅ SQLite Cloud DB-API driver [1](https://docs.sqlitecloud.io/docs/sdk-python-introduction)[2](https://github.com/sqlitecloud/sqlitecloud-py)
 
 # ------------------ Optional dependencies ------------------
 # PDF (ReportLab)
@@ -35,7 +34,6 @@ except Exception:
     KALEIDO_AVAILABLE = False
 
 # ------------------ Constants ------------------
-DB_PATH = "portfolio.db"
 TABLE = "projects"
 NEW_LABEL = "<New Project>"
 ALL_LABEL = "All"
@@ -51,7 +49,6 @@ def validate_plainsware(plainsware_project: str, plainsware_number: Any) -> Opti
     """
     If Plainsware Project = Yes, user must manually enter a Planisware number
     in the format JJMD-0079575 (JJMD- + 7 digits).
-
     Returns normalized JJMD string (uppercase) or None if Plainsware Project = No.
     """
     if str(plainsware_project).strip().lower() == "yes":
@@ -75,16 +72,24 @@ EXPECTED_COLUMNS = {
     "start_date": "TEXT",
     "due_date": "TEXT",
     "plainsware_project": "TEXT DEFAULT 'No'",
-    "plainsware_number": "TEXT",  # <-- CHANGED from INTEGER to TEXT
+    "plainsware_number": "TEXT",
     "created_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
     "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
 }
 
 # ------------------ DB / Utility Helpers ------------------
-def conn() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+def conn():
+    """
+    Open a connection to SQLite Cloud using Streamlit secrets.
+    sqlitecloud aims to be sqlite3-API compatible. [1](https://docs.sqlitecloud.io/docs/sdk-python-introduction)[2](https://github.com/sqlitecloud/sqlitecloud-py)
+    """
+    url = st.secrets.get("SQLITECLOUD_URL", "").strip()
+    if not url:
+        st.error("Missing Streamlit secret SQLITECLOUD_URL. Add it in Manage app → Settings → Secrets.")
+        st.stop()
+    return sqlitecloud.connect(url)
 
-def _table_info_df(c: sqlite3.Connection) -> pd.DataFrame:
+def _table_info_df(c) -> pd.DataFrame:
     return pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
 
 def _needs_rebuild_due_to_created_at(info: pd.DataFrame) -> bool:
@@ -109,7 +114,7 @@ def _needs_rebuild_due_to_plainsware_number_type(info: pd.DataFrame) -> bool:
     col_type = str(row.iloc[0]["type"] or "").strip().upper()
     return col_type != "TEXT"
 
-def _rebuild_projects_table(c: sqlite3.Connection) -> None:
+def _rebuild_projects_table(c) -> None:
     """Rebuild projects table to match expected schema (including TEXT plainsware_number)."""
     old_info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
     old_cols = old_info["name"].tolist()
@@ -193,7 +198,6 @@ def ensure_schema_and_migrate() -> None:
             )
             """
         )
-        c.commit()
 
         info = _table_info_df(c)
         existing_set = set(info["name"].tolist())
@@ -202,14 +206,12 @@ def ensure_schema_and_migrate() -> None:
         if "plainsware_proj" in existing_set and "plainsware_project" not in existing_set:
             try:
                 c.execute(f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_proj" TO "plainsware_project"')
-                c.commit()
             except Exception:
                 _rebuild_projects_table(c)
 
         if "plainsware_num" in existing_set and "plainsware_number" not in existing_set:
             try:
                 c.execute(f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_num" TO "plainsware_number"')
-                c.commit()
             except Exception:
                 _rebuild_projects_table(c)
 
@@ -235,8 +237,6 @@ def ensure_schema_and_migrate() -> None:
                 except Exception:
                     _rebuild_projects_table(c)
                     break
-
-        c.commit()
 
 # ------------------ Misc Helpers ------------------
 def to_iso(d: Optional[date]) -> str:
@@ -366,6 +366,15 @@ def build_pdf_report(df: pd.DataFrame, title: str = "Report") -> bytes:
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
 st.title("Digital Portfolio — Web Version")
 
+def assert_db_awake():
+    try:
+        with conn() as c:
+            c.execute("SELECT 1")
+    except Exception as e:
+        st.error("🚨 Database unavailable. Check SQLITECLOUD_URL / API key / project status.")
+        st.stop()
+
+assert_db_awake()
 ensure_schema_and_migrate()
 
 # ------------------ Session State ------------------
@@ -415,7 +424,7 @@ if new_clicked:
     st.session_state.reset_project_selector = True
     st.rerun()
 
-# ✅ Clear Filters that actually works (no rerun inside callback)
+# Clear Filters
 if clear_clicked:
     st.session_state.update({
         "pillar_f": ALL_LABEL,
@@ -430,18 +439,7 @@ if clear_clicked:
     except Exception:
         st.success("Cleared filters.")
     st.rerun()
-def assert_db_awake():
-    try:
-        with conn() as c:
-            c.execute("SELECT 1")
-    except Exception:
-        st.error(
-            "🚨 Database is paused or unavailable.\n\n"
-            "Please wake up the SQLite Cloud project."
-        )
-        st.stop()
 
-assert_db_awake()
 # ------------------ Form (Entry) ------------------
 with st.form("project_form"):
     c1, c2 = st.columns(2)
@@ -515,7 +513,6 @@ with st.form("project_form"):
             key="editor_plainsware_project",
         )
 
-        # ✅ JJMD text input (same as product app)
         plainsware_number = None
         if plainsware_project == "Yes":
             default_num = str(pw_num_val).strip() if pw_num_val is not None else ""
@@ -587,7 +584,6 @@ if submitted_new:
                         ts,
                     ),
                 )
-                c.commit()
 
             clear_cache()
             st.success("✅ Project created successfully!")
@@ -652,7 +648,6 @@ if submitted_update:
                             int(loaded_project["id"]),
                         ),
                     )
-                    c.commit()
 
                 clear_cache()
                 st.success("✅ Project updated!")
@@ -669,7 +664,6 @@ if submitted_delete:
         try:
             with conn() as c:
                 c.execute(f"DELETE FROM {TABLE} WHERE id=?", (int(loaded_project["id"]),))
-                c.commit()
             clear_cache()
             st.warning("Project deleted.")
             st.session_state.reset_project_selector = True
