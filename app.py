@@ -729,7 +729,7 @@ st.subheader("Filters")
 
 colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
 
-pillars = [ALL_LABEL] + sorted(set(PRESET_PILLARS) | set(distinct_values("pillar")))
+pillars = [ALL_LABEL] + PRESET_PILLARS.copy()
 statuses = [ALL_LABEL] + distinct_values("status")
 owners = [ALL_LABEL] + distinct_values("owner")
 
