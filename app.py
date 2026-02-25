@@ -464,8 +464,8 @@ if selected_project != NEW_LABEL:
     except Exception:
         loaded_project = None
 
-# ✅ Pillars: preset + any existing from DB
-pillar_from_db = distinct_values("pillar")
+# ✅ Digital Portfolio: Pillars are FIXED and NOT read from DB
+pillar_options = PRESET_PILLARS.copy()
 pillar_options = sorted(set(PRESET_PILLARS) | set(pillar_from_db))
 
 status_from_db = distinct_values("status")
