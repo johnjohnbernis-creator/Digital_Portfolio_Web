@@ -465,9 +465,9 @@ if selected_project != NEW_LABEL:
         loaded_project = None
 
 # ✅ Digital Portfolio: Pillars are FIXED and NOT read from DB
+pillar_from_db = []  # defined intentionally empty to prevent DB pillar bleed-through
 pillar_options = PRESET_PILLARS.copy()
 pillar_options = sorted(set(PRESET_PILLARS) | set(pillar_from_db))
-
 status_from_db = distinct_values("status")
 status_list = sorted(set(PRESET_STATUSES) | set(status_from_db))
 owner_list = distinct_values("owner")
