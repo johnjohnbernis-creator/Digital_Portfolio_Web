@@ -68,14 +68,29 @@ def _mask_url(url: str) -> str:
         return "****"
 
 def _get_sqlitecloud_url() -> str:
-    url = (st.secrets.get("SQLITECLOUD_URL") or "").strip()
+    """
+    Digital Portfolio app:
+    - Prefer SQLITECLOUD_URL_PORTFOLIO
+    - Fallback to SQLITECLOUD_URL only if needed
+    """
+    url = (
+        st.secrets.get("SQLITECLOUD_URL_PORTFOLIO")
+        or st.secrets.get("SQLITECLOUD_URL")
+        or ""
+    ).strip()
+
     if not url:
-        st.error("Missing Streamlit secret: SQLITECLOUD_URL (Manage app → Settings → Secrets).")
+        st.error(
+            "Missing Streamlit secret: SQLITECLOUD_URL_PORTFOLIO "
+            "(or fallback SQLITECLOUD_URL)."
+        )
         st.stop()
+
     if "YOUR_REAL_API_KEY" in url:
-        st.error("SQLITECLOUD_URL contains placeholder YOUR_REAL_API_KEY. Paste the real API key into Streamlit Secrets.")
+        st.error("SQLiteCloud URL contains placeholder YOUR_REAL_API_KEY.")
         st.caption(f"Current: {_mask_url(url)}")
         st.stop()
+
     return url
 
 # ------------------ SQLite Cloud Connection (context manager) ------------------
