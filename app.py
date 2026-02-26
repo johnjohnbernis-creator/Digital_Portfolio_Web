@@ -547,18 +547,19 @@ with st.form("project_form"):
 
         description = st.text_area("Description", value=desc_val, height=120, key="editor_desc")
 
-    with c2:
+ with c2:
     project_owner = st.text_input(
-    "Owner*",
-    value=owner_val,
-    key="editor_owner",
-)
-        project_status = st.selectbox(
-            "Status",
-            [""] + status_list,
-            index=safe_index([""] + status_list, status_val),
-            key="editor_status",
-        )
+        "Owner*",
+        value=owner_val,
+        key="editor_owner",
+    )
+
+    project_status = st.selectbox(
+        "Status",
+        [""] + status_list,
+        index=safe_index([""] + status_list, status_val),
+        key="editor_status",
+    )
 
         start_date = st.date_input("Start Date", value=start_val, key="editor_start")
         due_date = st.date_input("Due Date", value=due_val, key="editor_due")
