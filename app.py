@@ -548,15 +548,11 @@ with st.form("project_form"):
         description = st.text_area("Description", value=desc_val, height=120, key="editor_desc")
 
     with c2:
-        owner_options = owner_list[:] if owner_list else [""]
-        owner_index = owner_options.index(owner_val) if owner_val in owner_options else 0
-        project_owner = st.selectbox(
-            "Owner*",
-            options=owner_options,
-            index=owner_index,
-            key="editor_owner",
-        )
-
+    project_owner = st.text_input(
+    "Owner*",
+    value=owner_val,
+    key="editor_owner",
+)
         project_status = st.selectbox(
             "Status",
             [""] + status_list,
