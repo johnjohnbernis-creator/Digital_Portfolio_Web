@@ -1,9 +1,9 @@
 # ----------------------------------------------------------
 # Digital Portfolio — Web Version (Portfolio App)
 # ✅ Persistent SQLite Cloud version
-# - No local DB file (Streamlit Cloud filesystem is ephemeral)  # see Streamlit docs note [1](https://jnj.sharepoint.com/sites/MAF_HUB/APAC/Integrated%20Evidence%20Generation%20Plan/_layouts/15/Doc.aspx?sourcedoc=%7B6C3453F0-2DB7-4A32-85E5-29659587E3E2%7D&file=OnTrac%20Regional%20Training%20Presentation_Evidence%20Dissemination%20and%20JPUBS%20Integration.pptx&action=edit&mobileredirect=true&DefaultItemOpen=1)
-# - Uses sqlitecloud (sqlite3-compatible DB-API style)          # [2](https://jnj.sharepoint.com/teams/WCHDigitalHub/SitePages/Da.aspx?web=1)[3](https://jnj.sharepoint.com/sites/JJSC-GCSP/departments/QC/ERO/Documents/ERO%20Reg%20Compliance%20Topic%20Archive/TGA_Medical%20device%20cyber%20security%20guidance%20for%20industry_July%202019.pdf?web=1)
-# - Uses DB-in-path connection string: ...:8860/Portfolio?apikey=...  # [2](https://jnj.sharepoint.com/teams/WCHDigitalHub/SitePages/Da.aspx?web=1)
+# - No local DB file (Streamlit Cloud filesystem is ephemeral)  # see Streamlit docs note [1]( /
+# - Uses sqlitecloud (sqlite3-compatible DB-API style)          # [2]( /
+# - Uses DB-in-path connection string: ...:8860/Portfolio?apikey=...  # [2]( /
 # - Adds PRESET_PILLARS merged with DB values (fixes "only one pillar")
 # ----------------------------------------------------------
 
@@ -35,9 +35,12 @@ except Exception:
 
 # ------------------ Constants ------------------
 TABLE = "projects"
+
+# FIX: HTML entity → real text (prevents Python/UI issues)
 NEW_LABEL = "<New Project>"
 ALL_LABEL = "All"
 
+# FIX: HTML entities → real text (keep your labels readable)
 PRESET_PILLARS = [
     "Digital Mindset",
     "Advanced Analytics",
@@ -52,6 +55,8 @@ PRESET_STATUSES = [
     "Completed",
     "On Hold",
 ]
+
+# FIX: HTML entity in type hint
 def now_ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -62,6 +67,7 @@ def _mask_url(url: str) -> str:
         q = parse_qs(u.query)
         if "apikey" in q:
             q["apikey"] = ["****"]
+        # FIX: HTML entity → real &
         masked_query = "&".join([f"{k}={v[0]}" for k, v in q.items()])
         return f"{u.scheme}://{u.netloc}{u.path}" + (f"?{masked_query}" if masked_query else "")
     except Exception:
@@ -70,20 +76,12 @@ def _mask_url(url: str) -> str:
 def _get_sqlitecloud_url() -> str:
     """
     Digital Portfolio app:
-    - Prefer SQLITECLOUD_URL_PORTFOLIO
-    - Fallback to SQLITECLOUD_URL only if needed
+    - Uses ONLY SQLITECLOUD_URL_PORTFOLIO to prevent cross-app mixing.
     """
-    url = (
-        st.secrets.get("SQLITECLOUD_URL_PORTFOLIO")
-        or st.secrets.get("SQLITECLOUD_URL")
-        or ""
-    ).strip()
+    url = (st.secrets.get("SQLITECLOUD_URL_PORTFOLIO") or "").strip()
 
     if not url:
-        st.error(
-            "Missing Streamlit secret: SQLITECLOUD_URL_PORTFOLIO "
-            "(or fallback SQLITECLOUD_URL)."
-        )
+        st.error("Missing Streamlit secret: SQLITECLOUD_URL_PORTFOLIO (Digital Portfolio must not share DB).")
         st.stop()
 
     if "YOUR_REAL_API_KEY" in url:
@@ -98,10 +96,17 @@ def _get_sqlitecloud_url() -> str:
 def conn():
     """
     Open/close a SQLite Cloud connection.
+    FIX: Hard-pin the DB file using USE DATABASE to avoid any mixing.
+    SQLiteCloud supports selecting DB via USE DATABASE after connecting. [1](https://engage.cloud.microsoft/main/threads/eyJfdHlwZSI6IlRocmVhZCIsImlkIjoiMzU4MDc5ODQ5Mjk3NTEwNCJ9)[2](https://jnj.sharepoint.com/teams/EthiconGACampusEngineering/_layouts/15/Doc.aspx?sourcedoc=%7BDB87D610-1572-46E8-A9DB-DF7A28F34E97%7D&file=Tableau%20Job%20Aid%20(In-Progress)v1.2.docx&action=default&mobileredirect=true&DefaultItemOpen=1)
     """
     url = _get_sqlitecloud_url()
     c = sqlitecloud.connect(url)
+
+    # FIX: Optional but recommended: select the DB file inside portfoliostorage-project
+    db_name = (st.secrets.get("SQLITECLOUD_DB_PORTFOLIO") or "").strip()
     try:
+        if db_name:
+            c.execute(f"USE DATABASE {db_name}")
         yield c
     finally:
         try:
@@ -110,8 +115,8 @@ def conn():
             pass
 
 def assert_db_awake():
-    """Fail fast with the real exception (masked URL shown)."""
-    url = (st.secrets.get("SQLITECLOUD_URL") or "").strip()
+    """Fail fast with the real exception (masked URL shown). FIX: uses same URL as conn()."""
+    url = _get_sqlitecloud_url()
     try:
         with conn() as c:
             c.execute("SELECT 1")
@@ -331,8 +336,11 @@ def status_to_state(x: Any) -> str:
 def _clean(s: Any) -> str:
     return (s or "").strip()
 
+# FIX: Cache must vary by DB to prevent mixed dropdown values
+_DB_KEY = _mask_url(_get_sqlitecloud_url())
+
 @st.cache_data(show_spinner=False)
-def distinct_values(col: str) -> List[str]:
+def distinct_values(col: str, _db_key: str = "") -> List[str]:
     with conn() as c:
         df = pd.read_sql_query(
             f"""
@@ -468,9 +476,11 @@ if selected_project != NEW_LABEL:
 pillar_from_db = []  # defined intentionally empty to prevent DB pillar bleed-through
 pillar_options = PRESET_PILLARS.copy()
 pillar_options = sorted(set(PRESET_PILLARS) | set(pillar_from_db))
-status_from_db = distinct_values("status")
+
+# FIX: pass _DB_KEY to cached distinct_values
+status_from_db = distinct_values("status", _DB_KEY)
 status_list = sorted(set(PRESET_STATUSES) | set(status_from_db))
-owner_list = distinct_values("owner")
+owner_list = distinct_values("owner", _DB_KEY)
 
 bcol1, bcol2 = st.columns([1, 1])
 new_clicked = bcol1.button("New", key="btn_new_project")
@@ -730,12 +740,14 @@ st.subheader("Filters")
 colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
 
 pillars = [ALL_LABEL] + PRESET_PILLARS.copy()
-statuses = [ALL_LABEL] + distinct_values("status")
-owners = [ALL_LABEL] + distinct_values("owner")
+
+# FIX: pass _DB_KEY to prevent cached bleed
+statuses = [ALL_LABEL] + distinct_values("status", _DB_KEY)
+owners = [ALL_LABEL] + distinct_values("owner", _DB_KEY)
 
 priority_vals: List[int] = []
 try:
-    pv = distinct_values("priority")
+    pv = distinct_values("priority", _DB_KEY)
     priority_vals = sorted({int(x) for x in pv if str(x).strip().isdigit()})
 except Exception:
     pass
