@@ -53,7 +53,7 @@ PRESET_STATUSES = [
     "Planned",
     "In Progress",
     "Completed",
-    "On Hold",
+    "Idea",
 ]
 
 # FIX: HTML entity in type hint
