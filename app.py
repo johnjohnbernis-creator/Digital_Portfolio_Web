@@ -47,7 +47,7 @@ PRESET_PILLARS = [
     "Integration & Visualization",
     "Data Availability & Connectivity",
     "Smart Operations",
-    "Process Excellence",
+    "Vision Lab + Smart operations",
 ]
 PRESET_STATUSES = [
     "Planned",
