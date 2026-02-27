@@ -431,10 +431,13 @@ def build_pdf_report(df: pd.DataFrame, title: str = "Report") -> bytes:
     return pdf
 
 # ------------------ App Boot ------------------
+# ------------------ App Boot ------------------
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
 st.title("Digital Portfolio — Web Version")
 
 # ✅ APP1 safety lock (must be BEFORE any DB call)
+from urllib.parse import urlparse
+
 EXPECTED_DB_PATH = "/portfoliostorage-project"
 
 path = urlparse(_get_sqlitecloud_url()).path or ""
@@ -442,9 +445,11 @@ if path != EXPECTED_DB_PATH:
     st.error(f"❌ APP1 wrong DB configured. Expected {EXPECTED_DB_PATH}, got {path}")
     st.stop()
 
-# (Optional) TEMP banner for verification — remove after you confirm once
-st.caption("DB URL → " + _mask_url(_get_sqlitecloud_url()))
+# ✅ TEMP banner for verification (REMOVE after confirming once)
+st.caption("APP1 DB URL → " + _mask_url(_get_sqlitecloud_url()))
 
+assert_db_awake()
+ensure_schema_and_migrate()
 assert_db_awake()
 ensure_schema_and_migrate()
 
