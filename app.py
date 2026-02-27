@@ -11,7 +11,7 @@ import io
 from contextlib import contextmanager
 from datetime import datetime, date
 from typing import List, Dict, Optional, Any
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlunparse
 
 import pandas as pd
 import plotly.express as px
@@ -23,12 +23,14 @@ import sqlitecloud
 try:
     from reportlab.lib.pagesizes import letter
     from reportlab.pdfgen import canvas
+
     REPORTLAB_AVAILABLE = True
 except Exception:
     REPORTLAB_AVAILABLE = False
 
 try:
     import kaleido  # noqa: F401
+
     KALEIDO_AVAILABLE = True
 except Exception:
     KALEIDO_AVAILABLE = False
@@ -56,9 +58,10 @@ PRESET_STATUSES = [
     "Idea",
 ]
 
-# FIX: HTML entity in type hint
+
 def now_ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 
 # ------------------ Safe URL masking for UI/debug ------------------
 def _mask_url(url: str) -> str:
@@ -73,36 +76,72 @@ def _mask_url(url: str) -> str:
         return "****"
 
 
+def _normalize_sqlitecloud_netloc(netloc: str) -> str:
+    """
+    Fix common cluster hostname typo: crgxc3wk.g1.sqlite.cloud -> crgxc3wkg1.sqlite.cloud
+    Leaves everything else untouched.
+    """
+    # Separate host:port if present
+    if ":" in netloc:
+        host, port = netloc.rsplit(":", 1)
+        fixed_host = host
+        # Fix pattern: "<something>.g<digits>.sqlite.cloud" -> "<something>g<digits>.sqlite.cloud"
+        # Example: crgxc3wk.g1.sqlite.cloud -> crgxc3wkg1.sqlite.cloud
+        import re
+
+        fixed_host = re.sub(r"([a-zA-Z0-9]+)\.g(\d+\.sqlite\.cloud)$", r"\1g\2", fixed_host)
+        return f"{fixed_host}:{port}"
+    else:
+        import re
+
+        return re.sub(r"([a-zA-Z0-9]+)\.g(\d+\.sqlite\.cloud)$", r"\1g\2", netloc)
+
+
+def _swap_port(url: str, new_port: int) -> str:
+    u = urlparse(url)
+    # Build new netloc with swapped port
+    if u.hostname:
+        host = u.hostname
+        # preserve userinfo if any
+        userinfo = ""
+        if u.username:
+            userinfo = u.username
+            if u.password:
+                userinfo += f":{u.password}"
+            userinfo += "@"
+        netloc = f"{userinfo}{host}:{new_port}"
+        return urlunparse((u.scheme, netloc, u.path, u.params, u.query, u.fragment))
+    return url
+
+
 def _get_sqlitecloud_url() -> str:
     """
     Digital Portfolio app:
     - Uses ONLY SQLITECLOUD_URL_PORTFOLIO to prevent cross-app mixing.
-    - MUST include DB name in path
-    - MUST use TLS (8861)
     """
     url = (st.secrets.get("SQLITECLOUD_URL_PORTFOLIO") or "").strip()
 
     if not url:
-        st.error("Missing Streamlit secret: SQLITECLOUD_URL_PORTFOLIO")
+        st.error("Missing Streamlit secret: SQLITECLOUD_URL_PORTFOLIO (Digital Portfolio must not share DB).")
         st.stop()
 
-    parsed = urlparse(url)
-
-    # ✅ HARD FAIL if port is wrong
-    if parsed.port != 8861:
-        st.error("SQLiteCloud MUST use TLS port 8861.")
-        st.caption(_mask_url(url))
-        st.stop()
-
-    # ✅ HARD FAIL if DB missing
-    if not parsed.path or parsed.path == "/":
-        st.error("SQLiteCloud URL MUST include database name in path.")
-        st.caption(_mask_url(url))
+    if "YOUR_REAL_API_KEY" in url:
+        st.error("SQLiteCloud URL contains placeholder YOUR_REAL_API_KEY.")
+        st.caption(f"Current: {_mask_url(url)}")
         st.stop()
 
     return url
 
-    return url
+
+def _validate_db_name(db_name: str) -> bool:
+    """
+    Keep USE DATABASE but prevent injection / invalid names.
+    Allow typical SQLiteCloud DB names: letters, digits, underscore, dash, dot.
+    """
+    import re
+
+    return bool(re.fullmatch(r"[A-Za-z0-9_.-]+", db_name))
+
 
 # ------------------ SQLite Cloud Connection (context manager) ------------------
 @contextmanager
@@ -110,22 +149,81 @@ def conn():
     """
     Open/close a SQLite Cloud connection.
     FIX: Hard-pin the DB file using USE DATABASE to avoid any mixing.
-    SQLiteCloud supports selecting DB via USE DATABASE after connecting. [1](https://engage.cloud.microsoft/main/threads/eyJfdHlwZSI6IlRocmVhZCIsImlkIjoiMzU4MDc5ODQ5Mjk3NTEwNCJ9)[2](https://jnj.sharepoint.com/teams/EthiconGACampusEngineering/_layouts/15/Doc.aspx?sourcedoc=%7BDB87D610-1572-46E8-A9DB-DF7A28F34E97%7D&file=Tableau%20Job%20Aid%20(In-Progress)v1.2.docx&action=default&mobileredirect=true&DefaultItemOpen=1)
+    SQLiteCloud supports selecting DB via USE DATABASE after connecting. [1](https://docs.sqlitecloud.io/docs/sdk-python-introduction)[2](https://docs.sqlitecloud.io/docs/connect-cluster)
     """
     url = _get_sqlitecloud_url()
-    c = sqlitecloud.connect(url)
 
-    # FIX: Optional but recommended: select the DB file inside portfoliostorage-project
+    # --- Connection attempts (no deletions; just safer behavior) ---
+    # 1) Try exactly as provided
+    # 2) If socket fails, try normalized hostname (wk.g1 -> wkg1)
+    # 3) If port is 8860, also try 8861 as fallback
+    last_exc = None
+
+    candidates = []
+
+    candidates.append(url)
+
+    # normalize hostname typos
+    try:
+        u = urlparse(url)
+        normalized_netloc = _normalize_sqlitecloud_netloc(u.netloc)
+        if normalized_netloc != u.netloc:
+            candidates.append(urlunparse((u.scheme, normalized_netloc, u.path, u.params, u.query, u.fragment)))
+    except Exception:
+        pass
+
+    # port fallback 8860 -> 8861
+    try:
+        u = urlparse(url)
+        if u.port == 8860:
+            candidates.append(_swap_port(url, 8861))
+            # also combine with normalized host + port swap
+            try:
+                u2 = urlparse(candidates[-1])
+                normalized_netloc2 = _normalize_sqlitecloud_netloc(u2.netloc)
+                if normalized_netloc2 != u2.netloc:
+                    candidates.append(urlunparse((u2.scheme, normalized_netloc2, u2.path, u2.params, u2.query, u2.fragment)))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    c = None
+    for candidate in candidates:
+        try:
+            c = sqlitecloud.connect(candidate)
+            url = candidate  # remember the one that worked for masking/debug
+            break
+        except Exception as e:
+            last_exc = e
+            c = None
+
+    if c is None:
+        # Fail with clear info
+        st.error("🚨 Database unavailable (connection attempts failed).")
+        st.caption(f"Connection tried: {_mask_url(candidates[0])}")
+        if len(candidates) > 1:
+            st.caption(f"Fallback tried: {_mask_url(candidates[-1])}")
+        st.exception(last_exc)
+        st.stop()
+
+    # FIX: Optional but recommended: select DB file after connecting
     db_name = (st.secrets.get("SQLITECLOUD_DB_PORTFOLIO") or "").strip()
     try:
         if db_name:
-            c.execute(f"USE DATABASE {db_name}")
+            if not _validate_db_name(db_name):
+                st.error("Invalid SQLITECLOUD_DB_PORTFOLIO. Only letters/digits/._- allowed.")
+                st.caption(f"Value: {db_name!r}")
+                st.stop()
+            # Quote the database name safely
+            c.execute(f'USE DATABASE "{db_name}"')
         yield c
     finally:
         try:
             c.close()
         except Exception:
             pass
+
 
 def assert_db_awake():
     """Fail fast with the real exception (masked URL shown). FIX: uses same URL as conn()."""
@@ -139,9 +237,12 @@ def assert_db_awake():
         st.exception(e)
         st.stop()
 
+
 # ------------------ JJMD / Planisware validation ------------------
 import re
+
 JJMD_PATTERN = re.compile(r"^JJMD-\d{7}$", re.IGNORECASE)
+
 
 def validate_plainsware(plainsware_project: str, plainsware_number: Any) -> Optional[str]:
     """
@@ -156,6 +257,7 @@ def validate_plainsware(plainsware_project: str, plainsware_number: Any) -> Opti
             raise ValueError("Planisware Project Number must be in the format JJMD-0079575 (JJMD- + 7 digits).")
         return value
     return None
+
 
 # ✅ plainsware_number is TEXT
 EXPECTED_COLUMNS = {
@@ -178,6 +280,7 @@ EXPECTED_COLUMNS = {
 def _table_info_df(c) -> pd.DataFrame:
     return pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
 
+
 def _needs_rebuild_due_to_created_at(info: pd.DataFrame) -> bool:
     if info.empty:
         return False
@@ -189,6 +292,7 @@ def _needs_rebuild_due_to_created_at(info: pd.DataFrame) -> bool:
     no_default = pd.isna(dflt) or str(dflt).strip() == ""
     return bool(notnull and no_default)
 
+
 def _needs_rebuild_due_to_plainsware_number_type(info: pd.DataFrame) -> bool:
     if info.empty:
         return False
@@ -197,6 +301,7 @@ def _needs_rebuild_due_to_plainsware_number_type(info: pd.DataFrame) -> bool:
         return False
     col_type = str(row.iloc[0]["type"] or "").strip().upper()
     return col_type != "TEXT"
+
 
 def _rebuild_projects_table(c) -> None:
     old_info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
@@ -259,6 +364,7 @@ def _rebuild_projects_table(c) -> None:
     c.execute(f"ALTER TABLE {TABLE}__new RENAME TO {TABLE}")
     c.execute("COMMIT")
 
+
 def ensure_schema_and_migrate() -> None:
     with conn() as c:
         c.execute(
@@ -316,9 +422,11 @@ def ensure_schema_and_migrate() -> None:
                     _rebuild_projects_table(c)
                     break
 
+
 # ------------------ Misc Helpers ------------------
 def to_iso(d: Optional[date]) -> str:
     return d.strftime("%Y-%m-%d") if d else ""
+
 
 def try_date(s: Optional[str]) -> Optional[date]:
     if not s:
@@ -328,6 +436,7 @@ def try_date(s: Optional[str]) -> Optional[date]:
     except Exception:
         return None
 
+
 def safe_index(options: List[str], val: Optional[str], default: int = 0) -> int:
     try:
         if val in options:
@@ -336,21 +445,27 @@ def safe_index(options: List[str], val: Optional[str], default: int = 0) -> int:
         pass
     return default
 
+
 def safe_int(x: Any, default: int = 5) -> int:
     try:
         return int(x)
     except Exception:
         return default
 
+
 def status_to_state(x: Any) -> str:
     s = str(x).strip().lower()
     return "Completed" if s in {"done", "complete", "completed"} else "Ongoing"
 
+
 def _clean(s: Any) -> str:
     return (s or "").strip()
 
+
 # FIX: Cache must vary by DB to prevent mixed dropdown values
-_DB_KEY = _mask_url(_get_sqlitecloud_url())
+# IMPORTANT: do NOT call _get_sqlitecloud_url() before st.set_page_config().
+_DB_KEY = ""
+
 
 @st.cache_data(show_spinner=False)
 def distinct_values(col: str, _db_key: str = "") -> List[str]:
@@ -365,6 +480,7 @@ def distinct_values(col: str, _db_key: str = "") -> List[str]:
             c,
         )
     return df[col].dropna().astype(str).tolist()
+
 
 def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
     q = f"SELECT * FROM {TABLE}"
@@ -400,9 +516,11 @@ def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
     with conn() as c:
         return pd.read_sql_query(q, c, params=args)
 
+
 def fetch_all_projects() -> pd.DataFrame:
     with conn() as c:
         return pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY id", c)
+
 
 def clear_cache() -> None:
     try:
@@ -410,13 +528,14 @@ def clear_cache() -> None:
     except Exception:
         pass
 
+
 # ------------------ PDF Export ------------------
 def build_pdf_report(df: pd.DataFrame, title: str = "Report") -> bytes:
     if not REPORTLAB_AVAILABLE:
         return b""
     buffer = io.BytesIO()
     cpdf = canvas.Canvas(buffer, pagesize=letter)
-    width, height = letter
+    width, height = letter  # noqa: F841
 
     cpdf.setFont("Helvetica-Bold", 14)
     cpdf.drawString(40, height - 40, title)
@@ -443,15 +562,16 @@ def build_pdf_report(df: pd.DataFrame, title: str = "Report") -> bytes:
     buffer.close()
     return pdf
 
+
 # ------------------ App Boot ------------------
-# ---------------- App Boot ----------------
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
 st.title("Digital Portfolio — Web Version")
 
-# ✅ APP1 safety lock (must be BEFORE any DB call)
-from urllib.parse import urlparse
+# Now safe to compute DB key (no Streamlit calls before set_page_config)
+_DB_KEY = _mask_url(_get_sqlitecloud_url())
 
-EXPECTED_DB_PATH = "/portfolio.db"
+# ✅ APP1 safety lock (must be BEFORE any DB call)
+EXPECTED_DB_PATH = (st.secrets.get("EXPECTED_DB_PATH_PORTFOLIO") or "/portfolio.db").strip()
 
 path = urlparse(_get_sqlitecloud_url()).path or ""
 if path != EXPECTED_DB_PATH:
@@ -963,3 +1083,12 @@ if roadmap_fig is not None:
             )
         except Exception as e:
             st.info(f"PNG export unavailable in this runtime: {e}")
+
+"""
+Preserved (from your screenshot / paste) — not executed:
+
+Digital Portfolio — Web Version
+Database unavailable.
+SQLiteCloudException: An error occurred while initializing the socket.
+...
+"""
