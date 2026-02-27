@@ -1,9 +1,9 @@
 # ----------------------------------------------------------
 # Digital Portfolio — Web Version (Portfolio App)
 # ✅ Persistent SQLite Cloud version
-# - No local DB file (Streamlit Cloud filesystem is ephemeral)  # see Streamlit docs note [1]( /
-# - Uses sqlitecloud (sqlite3-compatible DB-API style)          # [2]( /
-# - Uses DB-in-path connection string: ...:8860/Portfolio?apikey=...  # [2]( /
+# - No local DB file (Streamlit Cloud filesystem is ephemeral)
+# - Uses sqlitecloud (sqlite3-compatible DB-API style)
+# - Uses DB-in-path connection string: ...:8860/Portfolio?apikey=...
 # - Adds PRESET_PILLARS merged with DB values (fixes "only one pillar")
 # ----------------------------------------------------------
 
@@ -38,11 +38,11 @@ except Exception:
 # ------------------ Constants ------------------
 TABLE = "projects"
 
-# FIX: HTML entity → real text (prevents Python/UI issues)
+# FIX: Use real text, not HTML entities (prevents comparison + UI issues)
 NEW_LABEL = "<New Project>"
 ALL_LABEL = "All"
 
-# FIX: HTML entities → real text (keep your labels readable)
+# FIX: Use real text (optional but recommended for readability)
 PRESET_PILLARS = [
     "Digital Mindset",
     "Advanced Analytics",
@@ -81,12 +81,9 @@ def _normalize_sqlitecloud_netloc(netloc: str) -> str:
     Fix common cluster hostname typo: crgxc3wk.g1.sqlite.cloud -> crgxc3wkg1.sqlite.cloud
     Leaves everything else untouched.
     """
-    # Separate host:port if present
     if ":" in netloc:
         host, port = netloc.rsplit(":", 1)
         fixed_host = host
-        # Fix pattern: "<something>.g<digits>.sqlite.cloud" -> "<something>g<digits>.sqlite.cloud"
-        # Example: crgxc3wk.g1.sqlite.cloud -> crgxc3wkg1.sqlite.cloud
         import re
 
         fixed_host = re.sub(r"([a-zA-Z0-9]+)\.g(\d+\.sqlite\.cloud)$", r"\1g\2", fixed_host)
@@ -99,10 +96,8 @@ def _normalize_sqlitecloud_netloc(netloc: str) -> str:
 
 def _swap_port(url: str, new_port: int) -> str:
     u = urlparse(url)
-    # Build new netloc with swapped port
     if u.hostname:
         host = u.hostname
-        # preserve userinfo if any
         userinfo = ""
         if u.username:
             userinfo = u.username
@@ -139,36 +134,101 @@ def _validate_db_name(db_name: str) -> bool:
     Allow typical SQLiteCloud DB names: letters, digits, underscore, dash, dot.
     """
     import re
-
     return bool(re.fullmatch(r"[A-Za-z0-9_.-]+", db_name))
-    # ------------------ Editor helpers (PUT HERE) ------------------
+
+
+# ------------------ Misc Helpers (needed by editor helpers) ------------------
+def to_iso(d: Optional[date]) -> str:
+    return d.strftime("%Y-%m-%d") if d else ""
+
+
+def try_date(s: Optional[str]) -> Optional[date]:
+    if not s:
+        return None
+    try:
+        return datetime.strptime(str(s), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def safe_index(options: List[str], val: Optional[str], default: int = 0) -> int:
+    try:
+        if val in options:
+            return options.index(val)
+    except Exception:
+        pass
+    return default
+
+
+def safe_int(x: Any, default: int = 5) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+
+def status_to_state(x: Any) -> str:
+    s = str(x).strip().lower()
+    return "Completed" if s in {"done", "complete", "completed"} else "Ongoing"
+
+
+def _clean(s: Any) -> str:
+    return (s or "").strip()
+
+
+# ------------------ Editor helpers (FIXED + COMPLETE) ------------------
+# NOTE: These helpers must be at top-level (not inside another function).
 
 def editor_defaults():
+    # These keys match YOUR FORM widget keys (editor_*)
     return {
-        "ed_id": None,
-        "ed_name": "",
-        "ed_pillar": PRESET_PILLARS[0],
-        "ed_priority": 5,
-        "ed_description": "",
-        "ed_owner": "",
-        "ed_status": PRESET_STATUSES[0],
-        "ed_start": None,
-        "ed_due": None,
-        "ed_plainsware": "No",
-        "ed_plainsware_number": "",
+        "editor_name": "",
+        "editor_pillar": PRESET_PILLARS[0] if PRESET_PILLARS else "",
+        "editor_priority": 5,
+        "editor_desc": "",
+        "editor_owner": "",
+        "editor_status": "",
+        "editor_start": date.today(),
+        "editor_due": date.today(),
+        "editor_plainsware_project": "No",
+        "editor_plainsware_number": "",
     }
 
-def editor_clear():
+
+def editor_clear_widgets():
+    # Reset all widget-bound keys
     for k, v in editor_defaults().items():
         st.session_state[k] = v
 
-def editor_load(row: dict):
-    st.session_state["ed_id"] = row.get("id")
-    st.session_state["ed_name"] = row.get("name") or ""
-    st.session_state["ed_pillar"] = row.get("pillar") or PRESET_PILLARS[0]
-    st.session_state["ed_priority"] = safe_int(row.get("priority"), 5)
-    st.session_state["ed_description"] = row.get("description") or ""
 
+def editor_prime_from_loaded(loaded_project: Optional[dict], pillar_options: List[str], status_list: List[str]):
+    """
+    SAFE: Only write to widget keys BEFORE widgets are created.
+    We call this BEFORE the st.form() section. We also guard with project-change detection.
+    """
+    if not loaded_project:
+        # New / none selected
+        editor_clear_widgets()
+        return
+
+    # Prime widget keys from DB
+    st.session_state["editor_name"] = loaded_project.get("name") or ""
+    pillar_val = loaded_project.get("pillar") or (pillar_options[0] if pillar_options else "")
+    st.session_state["editor_pillar"] = pillar_val if pillar_val in pillar_options else (pillar_options[0] if pillar_options else "")
+    st.session_state["editor_priority"] = safe_int(loaded_project.get("priority"), 5)
+    st.session_state["editor_desc"] = loaded_project.get("description") or ""
+    st.session_state["editor_owner"] = loaded_project.get("owner") or ""
+
+    status_val = loaded_project.get("status") or ""
+    # allow blank + values in status_list
+    st.session_state["editor_status"] = status_val if (status_val == "" or status_val in status_list) else ""
+
+    st.session_state["editor_start"] = try_date(loaded_project.get("start_date")) or date.today()
+    st.session_state["editor_due"] = try_date(loaded_project.get("due_date")) or date.today()
+
+    pw_val = loaded_project.get("plainsware_project", "No") or "No"
+    st.session_state["editor_plainsware_project"] = "Yes" if str(pw_val).strip().lower() == "yes" else "No"
+    st.session_state["editor_plainsware_number"] = (loaded_project.get("plainsware_number") or "").strip()
 
 
 # ------------------ SQLite Cloud Connection (context manager) ------------------
@@ -177,21 +237,14 @@ def conn():
     """
     Open/close a SQLite Cloud connection.
     FIX: Hard-pin the DB file using USE DATABASE to avoid any mixing.
-    SQLiteCloud supports selecting DB via USE DATABASE after connecting. [1](https://docs.sqlitecloud.io/docs/sdk-python-introduction)[2](https://docs.sqlitecloud.io/docs/connect-cluster)
+    SQLiteCloud supports selecting DB via USE DATABASE after connecting.
     """
     url = _get_sqlitecloud_url()
 
-    # --- Connection attempts (no deletions; just safer behavior) ---
-    # 1) Try exactly as provided
-    # 2) If socket fails, try normalized hostname (wk.g1 -> wkg1)
-    # 3) If port is 8860, also try 8861 as fallback
     last_exc = None
-
     candidates = []
-
     candidates.append(url)
 
-    # normalize hostname typos
     try:
         u = urlparse(url)
         normalized_netloc = _normalize_sqlitecloud_netloc(u.netloc)
@@ -200,12 +253,10 @@ def conn():
     except Exception:
         pass
 
-    # port fallback 8860 -> 8861
     try:
         u = urlparse(url)
         if u.port == 8860:
             candidates.append(_swap_port(url, 8861))
-            # also combine with normalized host + port swap
             try:
                 u2 = urlparse(candidates[-1])
                 normalized_netloc2 = _normalize_sqlitecloud_netloc(u2.netloc)
@@ -220,14 +271,13 @@ def conn():
     for candidate in candidates:
         try:
             c = sqlitecloud.connect(candidate)
-            url = candidate  # remember the one that worked for masking/debug
+            url = candidate
             break
         except Exception as e:
             last_exc = e
             c = None
 
     if c is None:
-        # Fail with clear info
         st.error("🚨 Database unavailable (connection attempts failed).")
         st.caption(f"Connection tried: {_mask_url(candidates[0])}")
         if len(candidates) > 1:
@@ -235,7 +285,6 @@ def conn():
         st.exception(last_exc)
         st.stop()
 
-    # FIX: Optional but recommended: select DB file after connecting
     db_name = (st.secrets.get("SQLITECLOUD_DB_PORTFOLIO") or "").strip()
     try:
         if db_name:
@@ -243,7 +292,6 @@ def conn():
                 st.error("Invalid SQLITECLOUD_DB_PORTFOLIO. Only letters/digits/._- allowed.")
                 st.caption(f"Value: {db_name!r}")
                 st.stop()
-            # Quote the database name safely
             c.execute(f'USE DATABASE "{db_name}"')
         yield c
     finally:
@@ -451,47 +499,7 @@ def ensure_schema_and_migrate() -> None:
                     break
 
 
-# ------------------ Misc Helpers ------------------
-def to_iso(d: Optional[date]) -> str:
-    return d.strftime("%Y-%m-%d") if d else ""
-
-
-def try_date(s: Optional[str]) -> Optional[date]:
-    if not s:
-        return None
-    try:
-        return datetime.strptime(str(s), "%Y-%m-%d").date()
-    except Exception:
-        return None
-
-
-def safe_index(options: List[str], val: Optional[str], default: int = 0) -> int:
-    try:
-        if val in options:
-            return options.index(val)
-    except Exception:
-        pass
-    return default
-
-
-def safe_int(x: Any, default: int = 5) -> int:
-    try:
-        return int(x)
-    except Exception:
-        return default
-
-
-def status_to_state(x: Any) -> str:
-    s = str(x).strip().lower()
-    return "Completed" if s in {"done", "complete", "completed"} else "Ongoing"
-
-
-def _clean(s: Any) -> str:
-    return (s or "").strip()
-
-
 # FIX: Cache must vary by DB to prevent mixed dropdown values
-# IMPORTANT: do NOT call _get_sqlitecloud_url() before st.set_page_config().
 _DB_KEY = ""
 
 
@@ -595,11 +603,8 @@ def build_pdf_report(df: pd.DataFrame, title: str = "Report") -> bytes:
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
 st.title("Digital Portfolio — Web Version")
 
-# Now safe to compute DB key (no Streamlit calls before set_page_config)
 _DB_KEY = _mask_url(_get_sqlitecloud_url())
 
-# ✅ APP1 safety lock (must be BEFORE any DB call)
-# ✅ APP1 safety lock (dynamic, DB-per-app)
 db_name = (st.secrets.get("SQLITECLOUD_DB_PORTFOLIO") or "").strip()
 
 if not db_name:
@@ -607,15 +612,12 @@ if not db_name:
     st.stop()
 
 EXPECTED_DB_PATH = f"/{db_name}"
-
 actual_path = urlparse(_get_sqlitecloud_url()).path or ""
 
 if actual_path != EXPECTED_DB_PATH:
-    st.error(
-        f"❌ APP1 wrong DB configured. Expected {EXPECTED_DB_PATH}, got {actual_path}"
-    )
+    st.error(f"❌ APP1 wrong DB configured. Expected {EXPECTED_DB_PATH}, got {actual_path}")
     st.stop()
-# ✅ TEMP banner for verification (REMOVE after confirming once)
+
 st.caption("APP1 DB URL → " + _mask_url(_get_sqlitecloud_url()))
 
 assert_db_awake()
@@ -628,9 +630,15 @@ if "project_selector" not in st.session_state:
     st.session_state.project_selector = NEW_LABEL
 if "reset_project_selector" not in st.session_state:
     st.session_state.reset_project_selector = False
+if "last_loaded_project_id" not in st.session_state:
+    st.session_state.last_loaded_project_id = None  # used for change-detection
+
 if st.session_state.reset_project_selector:
     st.session_state.project_selector = NEW_LABEL
     st.session_state.reset_project_selector = False
+    st.session_state.last_loaded_project_id = None
+    # ALSO clear editor widget values when reset
+    editor_clear_widgets()
 
 # ------------------ Project Editor ------------------
 st.markdown("---")
@@ -649,21 +657,23 @@ selected_project = st.selectbox(
 )
 
 loaded_project = None
+current_project_id = None
+
 if selected_project != NEW_LABEL:
     try:
-        project_id = int(selected_project.split(" — ", 1)[0])
+        current_project_id = int(selected_project.split(" — ", 1)[0])
         with conn() as c:
-            df = pd.read_sql_query(f"SELECT * FROM {TABLE} WHERE id=?", c, params=[project_id])
+            df = pd.read_sql_query(f"SELECT * FROM {TABLE} WHERE id=?", c, params=[current_project_id])
         loaded_project = df.iloc[0].to_dict() if not df.empty else None
     except Exception:
         loaded_project = None
+        current_project_id = None
 
 # ✅ Digital Portfolio: Pillars are FIXED and NOT read from DB
 pillar_from_db = []  # defined intentionally empty to prevent DB pillar bleed-through
 pillar_options = PRESET_PILLARS.copy()
 pillar_options = sorted(set(PRESET_PILLARS) | set(pillar_from_db))
 
-# FIX: pass _DB_KEY to cached distinct_values
 status_from_db = distinct_values("status", _DB_KEY)
 status_list = sorted(set(PRESET_STATUSES) | set(status_from_db))
 owner_list = distinct_values("owner", _DB_KEY)
@@ -672,8 +682,11 @@ bcol1, bcol2 = st.columns([1, 1])
 new_clicked = bcol1.button("New", key="btn_new_project")
 clear_clicked = bcol2.button("Clear Filters", key="btn_clear_filters")
 
+# ✅ FIX: "New" clears editor too (user request)
 if new_clicked:
     st.session_state.reset_project_selector = True
+    editor_clear_widgets()
+    st.session_state.last_loaded_project_id = None
     st.rerun()
 
 if clear_clicked:
@@ -691,6 +704,14 @@ if clear_clicked:
         st.success("Cleared filters.")
     st.rerun()
 
+# ✅ FIX: Prime editor widget keys when selection changes (BEFORE form renders)
+if current_project_id != st.session_state.last_loaded_project_id:
+    if current_project_id is None:
+        editor_clear_widgets()
+    else:
+        editor_prime_from_loaded(loaded_project, pillar_options, status_list)
+    st.session_state.last_loaded_project_id = current_project_id
+
 # ------------------ Form (Entry) ------------------
 st.markdown("---")
 st.subheader("Project Editor Form")
@@ -698,6 +719,8 @@ st.subheader("Project Editor Form")
 with st.form("project_form"):
     c1, c2 = st.columns(2)
 
+    # NOTE: values are now driven from session_state keys (primed above).
+    # Keeping your existing locals (not deleted), but they no longer control widget state.
     name_val = loaded_project.get("name") if loaded_project else ""
     pillar_val = loaded_project.get("pillar") if loaded_project else (pillar_options[0] if pillar_options else "")
     priority_val = int(loaded_project.get("priority", 5)) if loaded_project else 5
@@ -706,18 +729,17 @@ with st.form("project_form"):
     start_val = try_date(loaded_project.get("start_date")) if loaded_project else date.today()
     due_val = try_date(loaded_project.get("due_date")) if loaded_project else date.today()
     desc_val = loaded_project.get("description") if loaded_project else ""
-
     pw_val = loaded_project.get("plainsware_project", "No") if loaded_project else "No"
     pw_num_val = loaded_project.get("plainsware_number") if loaded_project else None
 
     with c1:
-        project_name = st.text_input("Name*", value=name_val, key="editor_name")
+        # ✅ FIX: remove value=... dependence; use session_state keys
+        project_name = st.text_input("Name*", key="editor_name")
 
-        pillar_index = pillar_options.index(pillar_val) if pillar_val in pillar_options else 0
         project_pillar = st.selectbox(
             "Pillar*",
             options=pillar_options,
-            index=pillar_index,
+            index=safe_index(pillar_options, st.session_state.get("editor_pillar", pillar_options[0] if pillar_options else "")),
             key="editor_pillar",
         )
 
@@ -725,44 +747,38 @@ with st.form("project_form"):
             "Priority",
             min_value=1,
             max_value=99,
-            value=int(priority_val),
+            value=int(st.session_state.get("editor_priority", 5)),
             step=1,
             format="%d",
             key="editor_priority",
         )
 
-        description = st.text_area("Description", value=desc_val, height=120, key="editor_desc")
+        description = st.text_area("Description", height=120, key="editor_desc")
 
     with c2:
-        project_owner = st.text_input(
-            "Owner*",
-            value=owner_val,
-            key="editor_owner",
-        )
+        project_owner = st.text_input("Owner*", key="editor_owner")
 
         project_status = st.selectbox(
             "Status",
             [""] + status_list,
-            index=safe_index([""] + status_list, status_val),
+            index=safe_index([""] + status_list, st.session_state.get("editor_status", "")),
             key="editor_status",
         )
 
-        start_date = st.date_input("Start Date", value=start_val, key="editor_start")
-        due_date = st.date_input("Due Date", value=due_val, key="editor_due")
+        start_date = st.date_input("Start Date", value=st.session_state.get("editor_start", date.today()), key="editor_start")
+        due_date = st.date_input("Due Date", value=st.session_state.get("editor_due", date.today()), key="editor_due")
 
         plainsware_project = st.selectbox(
             "Plainsware Project?",
             ["No", "Yes"],
-            index=1 if str(pw_val).strip() == "Yes" else 0,
+            index=1 if str(st.session_state.get("editor_plainsware_project", "No")).strip() == "Yes" else 0,
             key="editor_plainsware_project",
         )
 
         plainsware_number = None
         if plainsware_project == "Yes":
-            default_num = str(pw_num_val).strip() if pw_num_val is not None else ""
             plainsware_number = st.text_input(
                 "Planisware Project Number (JJMD-0079575)*",
-                value=default_num,
                 placeholder="JJMD-0079575",
                 key="editor_plainsware_number",
             )
@@ -911,6 +927,7 @@ if submitted_delete:
             clear_cache()
             st.warning("Project deleted.")
             st.session_state.reset_project_selector = True
+            editor_clear_widgets()
             st.rerun()
         except Exception as e:
             st.error(f"Delete error: {e}")
@@ -923,8 +940,6 @@ st.subheader("Filters")
 colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
 
 pillars = [ALL_LABEL] + PRESET_PILLARS.copy()
-
-# FIX: pass _DB_KEY to prevent cached bleed
 statuses = [ALL_LABEL] + distinct_values("status", _DB_KEY)
 owners = [ALL_LABEL] + distinct_values("owner", _DB_KEY)
 
