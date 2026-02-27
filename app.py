@@ -141,6 +141,34 @@ def _validate_db_name(db_name: str) -> bool:
     import re
 
     return bool(re.fullmatch(r"[A-Za-z0-9_.-]+", db_name))
+    # ------------------ Editor helpers (PUT HERE) ------------------
+
+def editor_defaults():
+    return {
+        "ed_id": None,
+        "ed_name": "",
+        "ed_pillar": PRESET_PILLARS[0],
+        "ed_priority": 5,
+        "ed_description": "",
+        "ed_owner": "",
+        "ed_status": PRESET_STATUSES[0],
+        "ed_start": None,
+        "ed_due": None,
+        "ed_plainsware": "No",
+        "ed_plainsware_number": "",
+    }
+
+def editor_clear():
+    for k, v in editor_defaults().items():
+        st.session_state[k] = v
+
+def editor_load(row: dict):
+    st.session_state["ed_id"] = row.get("id")
+    st.session_state["ed_name"] = row.get("name") or ""
+    st.session_state["ed_pillar"] = row.get("pillar") or PRESET_PILLARS[0]
+    st.session_state["ed_priority"] = safe_int(row.get("priority"), 5)
+    st.session_state["ed_description"] = row.get("description") or ""
+
 
 
 # ------------------ SQLite Cloud Connection (context manager) ------------------
