@@ -571,13 +571,22 @@ st.title("Digital Portfolio — Web Version")
 _DB_KEY = _mask_url(_get_sqlitecloud_url())
 
 # ✅ APP1 safety lock (must be BEFORE any DB call)
-EXPECTED_DB_PATH = (st.secrets.get("EXPECTED_DB_PATH_PORTFOLIO") or "/portfolio.db").strip()
+# ✅ APP1 safety lock (dynamic, DB-per-app)
+db_name = (st.secrets.get("SQLITECLOUD_DB_PORTFOLIO") or "").strip()
 
-path = urlparse(_get_sqlitecloud_url()).path or ""
-if path != EXPECTED_DB_PATH:
-    st.error(f"❌ APP1 wrong DB configured. Expected {EXPECTED_DB_PATH}, got {path}")
+if not db_name:
+    st.error("❌ Missing secret: SQLITECLOUD_DB_PORTFOLIO")
     st.stop()
 
+EXPECTED_DB_PATH = f"/{db_name}"
+
+actual_path = urlparse(_get_sqlitecloud_url()).path or ""
+
+if actual_path != EXPECTED_DB_PATH:
+    st.error(
+        f"❌ APP1 wrong DB configured. Expected {EXPECTED_DB_PATH}, got {actual_path}"
+    )
+    st.stop()
 # ✅ TEMP banner for verification (REMOVE after confirming once)
 st.caption("APP1 DB URL → " + _mask_url(_get_sqlitecloud_url()))
 
