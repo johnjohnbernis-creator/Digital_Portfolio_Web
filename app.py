@@ -67,27 +67,40 @@ def _mask_url(url: str) -> str:
         q = parse_qs(u.query)
         if "apikey" in q:
             q["apikey"] = ["****"]
-        # FIX: HTML entity → real &
         masked_query = "&".join([f"{k}={v[0]}" for k, v in q.items()])
         return f"{u.scheme}://{u.netloc}{u.path}" + (f"?{masked_query}" if masked_query else "")
     except Exception:
         return "****"
 
+
 def _get_sqlitecloud_url() -> str:
     """
     Digital Portfolio app:
     - Uses ONLY SQLITECLOUD_URL_PORTFOLIO to prevent cross-app mixing.
+    - MUST include DB name in path
+    - MUST use TLS (8861)
     """
     url = (st.secrets.get("SQLITECLOUD_URL_PORTFOLIO") or "").strip()
 
     if not url:
-        st.error("Missing Streamlit secret: SQLITECLOUD_URL_PORTFOLIO (Digital Portfolio must not share DB).")
+        st.error("Missing Streamlit secret: SQLITECLOUD_URL_PORTFOLIO")
         st.stop()
 
-    if "YOUR_REAL_API_KEY" in url:
-        st.error("SQLiteCloud URL contains placeholder YOUR_REAL_API_KEY.")
-        st.caption(f"Current: {_mask_url(url)}")
+    parsed = urlparse(url)
+
+    # ✅ HARD FAIL if port is wrong
+    if parsed.port != 8861:
+        st.error("SQLiteCloud MUST use TLS port 8861.")
+        st.caption(_mask_url(url))
         st.stop()
+
+    # ✅ HARD FAIL if DB missing
+    if not parsed.path or parsed.path == "/":
+        st.error("SQLiteCloud URL MUST include database name in path.")
+        st.caption(_mask_url(url))
+        st.stop()
+
+    return url
 
     return url
 
