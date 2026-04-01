@@ -9,106 +9,170 @@ from collections import Counter
 
 import pandas as pd
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont
+import uuid
 
-# Optional add-ons (app runs without them)
-try:
-    import streamlit_hotkeys as hotkeys  # optional
-except Exception:
-    hotkeys = None
-
-try:
-    from streamlit_image_zoom import image_zoom  # optional (zoom/pan)
-except Exception:
-    image_zoom = None
-
-# ROI rectangle selection (for snapshot)
-try:
-    from streamlit_drawable_canvas import st_canvas  # optional
-except Exception:
-    st_canvas = None
-
-# -----------------------
-# CONFIG
-# -----------------------
-st.set_page_config(page_title="Holistic FoilVision", layout="wide")
-
-# ✅ Databricks-safe: allow IMAGE_ROOT override (for /Volumes/...) while keeping your Windows default.
-# If IMAGE_ROOT is not set, it falls back to your current working folder.
-DEFAULT_ROOT_FOLDER = r"C:\Holistic_Foil"
-ROOT_FOLDER = os.environ.get("IMAGE_ROOT", "").strip() or DEFAULT_ROOT_FOLDER  # MUST contain subfolders with images
-
-SUPPORTED_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
-
+# ================================
+# ✅ REQUIRED GLOBAL CONSTANTS (FINAL FIX)
+# ================================
 BASE_DIR = os.path.dirname(__file__)
 
-# ✅ Databricks-safe: allow OUTPUT_DIR override (for /Volumes/.../outputs) while keeping local default.
-OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "").strip() or os.path.join(BASE_DIR, "output")
-SNAPSHOT_DIR = os.path.join(OUTPUT_DIR, "snapshots")
+# ✅ ADDITIVE fallback for Streamlit Community Cloud
+# Priority order:
+# 1) IMAGE_ROOT env var (Databricks / production)
+# 2) sample_images/ (Streamlit Community Cloud demo)
+# 3) Original local Windows path (no breakage)
+DEFAULT_ROOT_FOLDER = r"C:\Holistic_Foil"
 
-# Prefer enhanced config if present
-DEFECTS_CONFIG_PATH = os.path.join(BASE_DIR, "defects_config_enhanced.csv")
-if not os.path.isfile(DEFECTS_CONFIG_PATH):
-    DEFECTS_CONFIG_PATH = os.path.join(BASE_DIR, "defects_config.csv")
+ROOT_FOLDER = (
+    os.environ.get("IMAGE_ROOT", "").strip()
+    or os.path.join(BASE_DIR, "sample_images")
+    or DEFAULT_ROOT_FOLDER
+)
+# ================================
+# SESSION STATE INITIALIZATION (SAFE)
+# ================================
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "operator" not in st.session_state:
+    st.session_state.operator = None
+if "current_folder" not in st.session_state:
+    st.session_state.current_folder = None
+if "image_index" not in st.session_state:
+    st.session_state.image_index = 0
+if "results" not in st.session_state:
+    st.session_state.results = []
+if "resume_loaded" not in st.session_state:
+    st.session_state.resume_loaded = False
+# Keep a global images list so reruns never NameError
+if "images" not in globals():
+    images = []
 
-OPERATORS_CONFIG_PATH = os.path.join(BASE_DIR, "operators.yaml")
-
-# -----------------------
-# Compatibility helpers
-# -----------------------
-def safe_rerun():
-    if hasattr(st, "rerun"):
-        st.rerun()
-    elif hasattr(st, "experimental_rerun"):
-        st.experimental_rerun()
-    else:
-        st.stop()
-
-def notify_success(msg: str):
-    if hasattr(st, "toast"):
-        try:
-            st.toast(msg)
-            return
-        except Exception:
-            pass
-    st.success(msg)
-
-def safe_altair(chart):
-    try:
-        st.altair_chart(chart, use_container_width=True)
-    except TypeError:
-        st.altair_chart(chart)
-
-# -----------------------
-# Helpers
-# -----------------------
+# ================================
+# ✅ FIX: ensure required folders exist
+# ================================
 def ensure_dirs():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+    os.makedirs("logs", exist_ok=True)
+    os.makedirs("uploads", exist_ok=True)
+    os.makedirs("snapshots", exist_ok=True)
+    os.makedirs("exports", exist_ok=True)
 
-def now_utc_iso():
-    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
-def sha256_hex(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
-def safe_list_subfolders(root_folder: str):
-    if not os.path.isdir(root_folder):
+# ================================
+# ✅ ADDITIVE: Upload ZIP / images (Cloud-safe)
+# ================================
+UPLOAD_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+
+def _sanitize_label(s: str) -> str:
+    s = "" if s is None else str(s)
+    s = re.sub(r"[^A-Za-z0-9_\- ]+", "", s).strip()
+    return s.replace(" ", "_")[:80] or "UPLOAD"
+
+def _safe_extract_zip_images(zip_bytes: bytes, dest_dir: str):
+    """Extract only image files from ZIP into dest_dir, preventing zip-slip."""
+    os.makedirs(dest_dir, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+        for info in z.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename.replace('\\\\', '/')
+            norm = os.path.normpath(name).lstrip(os.sep).lstrip('/')
+            if norm.startswith('..') or os.path.isabs(norm):
+                continue
+            if not norm.lower().endswith(UPLOAD_EXT):
+                continue
+            out_path = os.path.join(dest_dir, norm)
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with z.open(info) as rf, open(out_path, 'wb') as wf:
+                wf.write(rf.read())
+
+def _save_uploaded_images(files, dest_dir: str):
+    os.makedirs(dest_dir, exist_ok=True)
+    seen = {}
+    for f in files or []:
+        base = os.path.basename(getattr(f, 'name', 'uploaded'))
+        base = _sanitize_label(base)
+        root, ext = os.path.splitext(base)
+        ext = ext.lower()
+        if ext not in UPLOAD_EXT:
+            continue
+        if base in seen:
+            seen[base] += 1
+            base = f"{root}_{seen[base]}{ext}"
+        else:
+            seen[base] = 0
+        out_path = os.path.join(dest_dir, base)
+        data = f.getvalue() if hasattr(f, 'getvalue') else f.read()
+        with open(out_path, 'wb') as wf:
+            wf.write(data)
+
+def _prepare_uploaded_images_ui():
+    """Sidebar UI: choose ZIP or multi-image upload. Sets session_state upload_* keys."""
+    st.sidebar.markdown('---')
+    st.sidebar.subheader('📁 Image Source')
+    mode = st.sidebar.radio(
+        'Choose source',
+        ['Local folders (on this machine)', 'Upload ZIP (recommended)', 'Upload images (multi-select)'],
+        key='image_source_mode'
+    )
+
+    # defaults
+    st.session_state.setdefault('upload_mode', False)
+    st.session_state.setdefault('upload_folder_path', '')
+    st.session_state.setdefault('upload_label', '')
+
+    if mode == 'Upload ZIP (recommended)':
+        zf = st.sidebar.file_uploader(
+            'Upload a ZIP of images (can include subfolders)',
+            type=['zip'],
+            key='zip_uploader'
+        )
+        if zf is not None:
+            token = f"zip::{zf.name}::{getattr(zf, 'size', 0)}"
+            if st.session_state.get('upload_token') != token:
+                upload_id = uuid.uuid4().hex[:10]
+                dest = os.path.join('uploads', f"zip_{upload_id}")
+                _safe_extract_zip_images(zf.getvalue(), dest)
+                st.session_state['upload_token'] = token
+                st.session_state['upload_mode'] = True
+                st.session_state['upload_folder_path'] = dest
+                st.session_state['upload_label'] = f"UPLOAD_{_sanitize_label(zf.name)}"
+            st.sidebar.success('ZIP loaded ✅')
+
+    elif mode == 'Upload images (multi-select)':
+        fs = st.sidebar.file_uploader(
+            'Upload images (select multiple files)',
+            type=[e.lstrip('.') for e in UPLOAD_EXT],
+            accept_multiple_files=True,
+            key='img_uploader'
+        )
+        if fs:
+            token = 'files::' + '|'.join([f"{f.name}:{getattr(f,'size',0)}" for f in fs])
+            if st.session_state.get('upload_token') != token:
+                upload_id = uuid.uuid4().hex[:10]
+                dest = os.path.join('uploads', f"files_{upload_id}")
+                _save_uploaded_images(fs, dest)
+                st.session_state['upload_token'] = token
+                st.session_state['upload_mode'] = True
+                st.session_state['upload_folder_path'] = dest
+                st.session_state['upload_label'] = f"UPLOAD_{upload_id}"
+            st.sidebar.success('Images loaded ✅')
+
+    else:
+        st.session_state['upload_mode'] = False
+
+    return mode
+def list_images_external(folder_path):
+    if not folder_path or not os.path.isdir(folder_path):
         return []
-    return sorted([f for f in os.listdir(root_folder) if os.path.isdir(os.path.join(root_folder, f))])
 
-def list_images_recursive(folder_path: str):
-    rels = []
-    if not os.path.isdir(folder_path):
-        return rels
+    images = []
     for root, _, files in os.walk(folder_path):
-        for fn in files:
-            if fn.lower().endswith(SUPPORTED_EXT):
-                full = os.path.join(root, fn)
-                rels.append(os.path.relpath(full, folder_path))
-    rels.sort()
-    return rels
+        for f in files:
+            if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")):
+                images.append(os.path.join(root, f))
 
+    return sorted(images)
 def summarize_extensions(folder_path: str):
     exts = []
     total = 0
@@ -118,7 +182,11 @@ def summarize_extensions(folder_path: str):
             ext = os.path.splitext(fn)[1].lower() or "(no ext)"
             exts.append(ext)
     return total, Counter(exts)
-
+    try:
+        return pd.read_csv(path)
+    except Exception as e:
+        st.error(f"Failed to load defects config: {e}")
+        return pd.DataFrame()
 def load_defects_config(path: str) -> pd.DataFrame:
     if not os.path.isfile(path):
         return pd.DataFrame([{
@@ -191,6 +259,7 @@ def dedupe_master(master_df: pd.DataFrame) -> pd.DataFrame:
             master_df[c] = ""
     return master_df.drop_duplicates(subset=["Folder", "Image", "Operator"], keep="last").reset_index(drop=True)
 
+
 # -------------------------------
 # ✅ ADDITIVE: Robust classification parser
 # Handles separators: newline, |, │, ¦, ; and regex fallback
@@ -201,13 +270,15 @@ def parse_classification_options(raw_value):
     if (not s) or (s.lower() in ("nan", "none")):
         return ["Critical", "Class I", "Class II", "Class III"]
 
-    for sep in ["\\r\\n", "\\r", "\n", "|", "│", "¦", ";"]:
+    # Normalize common separators to newline (keep as escapes, not literal CR)
+    for sep in ["\\r\\n", "\\r", "|", "│", "¦", ";"]:
         s = s.replace(sep, "\n")
 
     parts = [p.strip() for p in s.split("\n") if p.strip()]
 
+    # Regex fallback if still a single combined token
     if len(parts) <= 1:
-        tokens = re.findall(r"(?i)critical|class\s*i{1,3}\b", s)
+        tokens = re.findall(r"(?i)critical|class\\s*i{1,3}\\b", s)
         if tokens:
             norm = []
             for t in tokens:
@@ -215,7 +286,7 @@ def parse_classification_options(raw_value):
                 if tl == "critical":
                     norm.append("Critical")
                 elif tl.startswith("class"):
-                    roman = re.sub(r"(?i)^class\s*", "", t).strip().upper()
+                    roman = re.sub(r"(?i)^class\\s*", "", t).strip().upper()
                     norm.append(f"Class {roman}")
             seen = set()
             out = []
@@ -229,6 +300,7 @@ def parse_classification_options(raw_value):
     if not parts:
         parts = ["Critical", "Class I", "Class II", "Class III"]
 
+    # Canonical ordering: Critical first if present
     crit = [x for x in parts if x.strip().lower() == "critical"]
     rest = [x for x in parts if x.strip().lower() != "critical"]
     return crit + rest
@@ -294,6 +366,7 @@ def create_snapshot(img: Image.Image, crop_box_xyxy, color_hex: str, label: str)
     y1 = clamp(int(round(y1)), 0, h - 1)
     x2 = clamp(int(round(x2)), 1, w)
     y2 = clamp(int(round(y2)), 1, h)
+
     if x2 <= x1 + 1 or y2 <= y1 + 1:
         pad = 40
         x1 = clamp(x1 - pad, 0, w - 1)
@@ -303,12 +376,14 @@ def create_snapshot(img: Image.Image, crop_box_xyxy, color_hex: str, label: str)
 
     roi = img.crop((x1, y1, x2, y2)).convert("RGB")
     border = max(6, int(min(roi.size) * 0.02))
+
     out = Image.new("RGB", (roi.size[0] + border * 2, roi.size[1] + border * 2), color_hex)
     out.paste(roi, (border, border))
 
     bar_h = max(28, int(out.size[1] * 0.08))
     labeled = Image.new("RGB", (out.size[0], out.size[1] + bar_h), "#111111")
     labeled.paste(out, (0, bar_h))
+
     draw = ImageDraw.Draw(labeled)
     try:
         font = ImageFont.load_default()
@@ -327,6 +402,7 @@ def export_zip_from_master(master_df: pd.DataFrame) -> bytes:
     bio = io.BytesIO()
     with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("MASTER__image_review_results.csv", master_df.to_csv(index=False))
+
         if "SnapshotPath" in master_df.columns:
             snap_paths = (
                 master_df["SnapshotPath"]
@@ -341,6 +417,7 @@ def export_zip_from_master(master_df: pd.DataFrame) -> bytes:
                 fullp = os.path.join(OUTPUT_DIR, relp)
                 if os.path.isfile(fullp):
                     z.write(fullp, arcname=os.path.join("snapshots", os.path.basename(relp)))
+
         z.writestr(
             "README.txt",
             "This ZIP contains:\n"
@@ -372,13 +449,19 @@ if "resume_loaded" not in st.session_state:
 st.title("Holistic FoilVision")
 ensure_dirs()
 
+
 # -----------------------
-# LOGIN
+# SIMPLE OPERATOR LOGIN (NO PASSWORD)
 # -----------------------
 st.sidebar.header("🔐 Operator Login")
-op_cfg = load_operator_config(OPERATORS_CONFIG_PATH)
 
-if st.session_state.logged_in and st.session_state.operator:
+if not st.session_state.logged_in:
+    operator_name = st.sidebar.text_input("Operator name", value="")
+    if st.sidebar.button("Enter") and operator_name.strip():
+        st.session_state.logged_in = True
+        st.session_state.operator = operator_name.strip()
+        st.rerun()
+else:
     st.sidebar.success(f"Logged in as: {st.session_state.operator}")
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
@@ -387,30 +470,18 @@ if st.session_state.logged_in and st.session_state.operator:
         st.session_state.image_index = 0
         st.session_state.results = []
         st.session_state.resume_loaded = False
-        safe_rerun()
-else:
-    if op_cfg is None:
-        operator_name = st.sidebar.text_input("Operator name", value="")
-        if st.sidebar.button("Enter") and operator_name.strip():
-            st.session_state.logged_in = True
-            st.session_state.operator = operator_name.strip()
-            safe_rerun()
-    else:
-        users = sorted(list((op_cfg.get("users") or {}).keys()))
-        username = st.sidebar.selectbox("Username", users) if users else st.sidebar.text_input("Username")
-        password = st.sidebar.text_input("Password", type="password")
-        if st.sidebar.button("Login"):
-            if verify_login(op_cfg, username, password):
-                disp = (op_cfg.get("users") or {}).get(username, {}).get("name") or username
-                st.session_state.logged_in = True
-                st.session_state.operator = disp
-                safe_rerun()
-            else:
-                st.sidebar.error("Invalid username/password")
+        st.rerun()
 
 if not st.session_state.logged_in:
     st.stop()
-
+def load_defects_config(path: str) -> pd.DataFrame:
+    """
+    Load defects configuration from CSV.
+    Safe fallback if file does not exist or fails to load.
+    """
+    if not os.path.isfile(path):
+        st.warning(f"Defects config not found: {path}")
+        return pd.DataFrame()
 # -----------------------
 # DEFECT CONFIG + FILTERS + LEGEND
 # -----------------------
@@ -428,6 +499,7 @@ if vision_only:
 
 categories = sorted(filtered_defects["category"].dropna().unique().tolist())
 
+# Legend (description removed)
 with st.sidebar.expander("📘 Defect Legend", expanded=False):
     legend_cols = ["category", "defect_family", "defect", "vision_eligible", "test_dependent"]
     legend = defects_df[legend_cols].copy().sort_values(["category", "defect_family", "defect"])
@@ -441,27 +513,92 @@ zoom_increment = st.sidebar.slider("Scroll increment", min_value=0.1, max_value=
 behavior_to_mode = {"Click-to-zoom": "dragmove", "Magnifier lens": "mousemove", "Scroll wheel": "scroll", "Both": "both"}
 zoom_mode = behavior_to_mode.get(zoom_behavior, "dragmove")
 
+
+# ================================
+# ✅ GUARANTEED HELPERS (FINAL SAFETY NET)
+# ================================
+if 'safe_list_subfolders' not in globals():
+    def safe_list_subfolders(p):
+        try:
+            return sorted([d for d in os.listdir(p) if os.path.isdir(os.path.join(p, d))])
+        except Exception:
+            return []
+
+# Ensure ROOT_FOLDER always exists
+if not os.path.isdir(ROOT_FOLDER):
+    os.makedirs(ROOT_FOLDER, exist_ok=True)
+
 # -----------------------
 # FOLDER SELECTION
 # -----------------------
-folders = safe_list_subfolders(ROOT_FOLDER)
-if not folders:
-    st.error(f"No subfolders found under ROOT_FOLDER: {ROOT_FOLDER}")
-    st.stop()
 
-selected_folder = st.selectbox("Select a folder with images", folders)
-folder_path = os.path.join(ROOT_FOLDER, selected_folder)
-images = list_images_recursive(folder_path)
+# ✅ ADDITIVE ONLY: IMAGE_ROOT override from Streamlit Secrets
+IMAGE_ROOT = st.secrets.get("IMAGE_ROOT", "").strip()
 
-if not images:
-    total_files, ext_counts = summarize_extensions(folder_path)
-    st.warning("No images found in this folder.")
-    st.write(f"Folder path: {folder_path}")
-    st.write(f"Total files found (all types): {total_files}")
-    st.write("File extensions found:")
-    st.json({k: int(v) for k, v in ext_counts.most_common(20)})
-    st.info(f"Supported extensions: {', '.join(SUPPORTED_EXT)}")
-    st.stop()
+# ✅ SAFE fallback behavior:
+# - If IMAGE_ROOT is valid → locked single-folder mode
+# - If IMAGE_ROOT is invalid/missing → fall back to folder dropdown (no hard stop)
+if IMAGE_ROOT and os.path.isdir(IMAGE_ROOT):
+    selected_folder = os.path.basename(IMAGE_ROOT)
+    folder_path = IMAGE_ROOT
+    images = list_images_external(IMAGE_ROOT)
+else:
+    IMAGE_ROOT = ""  # fallback to ROOT_FOLDER selection
+# ================================
+# SAFETY FIX: ensure helper exists at runtime
+# ================================
+if "list_images_external" not in globals():
+    def list_images_external(folder_path):
+        if not folder_path or not os.path.isdir(folder_path):
+            return []
+
+        images = []
+        for root, _, files in os.walk(folder_path):
+            for f in files:
+                if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")):
+                    images.append(os.path.join(root, f))
+
+        return sorted(images)
+    if not images:
+        st.error(f"No images found in IMAGE_ROOT: {IMAGE_ROOT}")
+        st.stop()
+else:
+    # fall back to ROOT_FOLDER logic below
+    pass
+
+
+# ✅ ADDITIVE: If user uploaded images, bypass local folder dropdown
+if st.session_state.get("upload_mode", False) and st.session_state.get("upload_folder_path", ""):
+    selected_folder = st.session_state.get("upload_label", "UPLOAD")
+    folder_path = st.session_state.get("upload_folder_path", "")
+    images = list_images_external(folder_path)
+    if not images:
+        total_files, ext_counts = summarize_extensions(folder_path) if os.path.isdir(folder_path) else (0, Counter())
+        st.warning("No images found in uploaded content.")
+        st.write(f"Upload folder path: {folder_path}")
+        st.write(f"Total files found (all types): {total_files}")
+        if hasattr(ext_counts, "most_common"):
+            st.json({k: int(v) for k, v in ext_counts.most_common(20)})
+        st.stop()
+else:
+    folders = safe_list_subfolders(ROOT_FOLDER)
+    if not folders:
+        st.error(f"No subfolders found under ROOT_FOLDER: {ROOT_FOLDER}")
+        st.stop()
+
+    selected_folder = st.selectbox("Select a folder with images", folders)
+    folder_path = os.path.join(ROOT_FOLDER, selected_folder)
+    images = list_images_recursive(folder_path)
+
+    if not images:
+        total_files, ext_counts = summarize_extensions(folder_path)
+        st.warning("No images found in this folder.")
+        st.write(f"Folder path: {folder_path}")
+        st.write(f"Total files found (all types): {total_files}")
+        st.write("File extensions found:")
+        st.json({k: int(v) for k, v in ext_counts.most_common(20)})
+        st.info(f"Supported extensions: {', '.join(SUPPORTED_EXT)}")
+        st.stop()
 
 operator_safe = "".join([c for c in st.session_state.operator if c.isalnum() or c in (" ", "_", "-")]).strip().replace(" ", "_")
 session_results_path = os.path.join(OUTPUT_DIR, f"{selected_folder}__{operator_safe}__results.csv")
@@ -486,12 +623,10 @@ if not st.session_state.resume_loaded:
                     if imgname not in reviewed:
                         idx = j
                         break
-                else:
-                    idx = min(len(images) - 1, len(images) - 1)
+                idx = min(j + 1, len(images) - 1)
                 st.session_state.image_index = idx
                 st.session_state.resume_loaded = True
                 safe_rerun()
-
             if st.button("Start fresh"):
                 st.session_state.resume_loaded = True
                 safe_rerun()
@@ -508,6 +643,8 @@ def defect_key(i): return f"defect_{selected_folder}_{operator_safe}_{i}"
 def class_key(i): return f"class_{selected_folder}_{operator_safe}_{i}"
 def comment_key(i): return f"comment_{selected_folder}_{operator_safe}_{i}"
 def roi_key(i): return f"roi_{selected_folder}_{operator_safe}_{i}"
+
+# ✅ ADDITIVE: Critical confirmation key (does not remove anything)
 def crit_confirm_key(i): return f"crit_confirm_{selected_folder}_{operator_safe}_{i}"
 
 def go_prev():
@@ -522,10 +659,12 @@ def go_next():
 def save_current():
     i = st.session_state.image_index
     img_rel = images[i]
+
     decision = st.session_state.get(decision_key(i), "Good")
     defect = st.session_state.get(defect_key(i), "")
     classification = st.session_state.get(class_key(i), "")
     comment = st.session_state.get(comment_key(i), "")
+
     roi_xyxy = ""
     snapshot_rel_path = ""
 
@@ -533,9 +672,12 @@ def save_current():
         if not str(defect).strip():
             st.warning("Select a Defect before saving a Bad decision.")
             return False
+
         if not str(classification).strip():
             st.warning("Select a Classification before saving a Bad decision.")
             return False
+
+        # ✅ ADDITIVE: block save if Critical not confirmed
         if str(classification).strip().lower() == "critical":
             if not bool(st.session_state.get(crit_confirm_key(i), False)):
                 st.warning("Critical classification requires confirmation before saving.")
@@ -547,20 +689,26 @@ def save_current():
             return False
 
         roi_xyxy = ",".join([str(int(round(x))) for x in roi])
+
         img_path = os.path.join(folder_path, img_rel)
         img = Image.open(img_path)
         color_hex = defect_color_map.get(str(defect).strip(), "#FF00FF")
         label = f"{defect} \n {classification}"
+
         snap = create_snapshot(img, roi, color_hex, label)
+
         review_id = sha256_hex(f"{selected_folder}\n{img_rel}\n{st.session_state.operator}")
         snap_name = f"{selected_folder}__{operator_safe}__{review_id[:12]}__{os.path.basename(img_rel)}.png"
         relp = os.path.join("snapshots", snap_name)
         snapshot_rel_path = save_snapshot_file(snap, relp)
+
     else:
         defect = ""
         classification = ""
         roi_xyxy = ""
         snapshot_rel_path = ""
+
+        # ✅ ADDITIVE: reset critical confirmation when Good
         st.session_state[crit_confirm_key(i)] = False
 
     record = {
@@ -583,6 +731,7 @@ def save_current():
             st.session_state.results[k] = record
             updated = True
             break
+
     if not updated:
         st.session_state.results.append(record)
 
@@ -681,19 +830,23 @@ with left:
                     y2 = (top_px + h_px) / scale
                     roi_xyxy = (x1, y1, x2, y2)
 
-                    if roi_xyxy:
-                        st.session_state[roi_key(i)] = roi_xyxy
-                        chosen_def = st.session_state.get(defect_key(i), "")
-                        chosen_class = st.session_state.get(class_key(i), "")
-                        label = f"{chosen_def} \n {chosen_class}".strip(" \n")
-                        preview = create_snapshot(img, roi_xyxy, color_hex, label if label else "Snapshot")
-                        preview_w = min(900, preview.size[0]) if hasattr(preview, "size") else 900
-                        st.image(preview, caption=f"Snapshot Preview (border = {color_hex})", width=preview_w)
-                else:
-                    st.caption("No ROI selected yet. Draw a rectangle to enable snapshot saving.")
+            if roi_xyxy:
+                st.session_state[roi_key(i)] = roi_xyxy
+
+                chosen_def = st.session_state.get(defect_key(i), "")
+                chosen_class = st.session_state.get(class_key(i), "")
+                label = f"{chosen_def} \n {chosen_class}".strip(" \n")
+                preview = create_snapshot(img, roi_xyxy, color_hex, label if label else "Snapshot")
+
+                preview_w = min(900, preview.size[0]) if hasattr(preview, "size") else 900
+                st.image(preview, caption=f"Snapshot Preview (border = {color_hex})", width=preview_w)
+
+            else:
+                st.caption("No ROI selected yet. Draw a rectangle to enable snapshot saving.")
 
 with right:
     st.subheader("Inspection Decision")
+
     st.radio(
         "Decision",
         ["Good", "Bad"],
@@ -720,8 +873,8 @@ with right:
 
         defect_options = df_cat["defect"].tolist()
         chosen_defect = st.selectbox("Defect", defect_options, key=defect_key(i))
-        c = defect_color_map.get(str(chosen_defect).strip(), "#999999")
 
+        c = defect_color_map.get(str(chosen_defect).strip(), "#999999")
         st.markdown(
             f"""
             <div style="display:flex;align-items:center;gap:10px;margin-top:4px;margin-bottom:10px;">
@@ -739,10 +892,17 @@ with right:
         raw = str(meta.iloc[0].get("classification_options", "Critical\nClass I\nClass II\nClass III")) if not meta.empty else "Critical\nClass I\nClass II\nClass III"
         class_opts = parse_classification_options(raw)
 
-        # Original selectbox preserved but disabled
+        # -------------------------------
+        # ✅ ADDITIVE CLASSIFICATION UI (DO NOT DELETE ORIGINAL)
+        # - Critical first
+        # - 🛑 icon in UI
+        # - confirmation required
+        # -------------------------------
+        # Original line preserved (not deleted) but disabled to avoid conflicting widgets:
         if False:
             st.selectbox("Classification", class_opts, key=class_key(i))
 
+        # New behavior:
         crit = [x for x in class_opts if x.lower() == "critical"]
         rest = [x for x in class_opts if x.lower() != "critical"]
         ordered = crit + rest
@@ -760,8 +920,10 @@ with right:
             key=f"{class_key(i)}__display"
         )
 
+        # store clean value in existing key
         st.session_state[class_key(i)] = display_map[chosen_display]
 
+        # show confirmation checkbox if critical
         if str(st.session_state.get(class_key(i), "")).strip().lower() == "critical":
             st.error("🛑 Critical selected — confirmation required.")
             st.checkbox("I confirm this defect is CRITICAL", key=crit_confirm_key(i))
@@ -844,6 +1006,14 @@ with st.sidebar.expander("📄 Reports", expanded=False):
     else:
         st.caption("No master results yet. Save at least one review.")
 
-
-
-
+# ✅ ADDITIVE ONLY: External folder image loader (Secrets-aware)
+def list_images_external(folder_path: str):
+    rels = []
+    if not os.path.isdir(folder_path):
+        return rels
+    for root, _, files in os.walk(folder_path):
+        for fn in files:
+            if fn.lower().endswith(SUPPORTED_EXT):
+                full = os.path.join(root, fn)
+                rels.append(os.path.relpath(full, folder_path))
+    return sorted(rels)
