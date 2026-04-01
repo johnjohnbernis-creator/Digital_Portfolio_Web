@@ -1,4 +1,974 @@
+
+# Digital Portfolio — Web Version (Portfolio App)
+# ✅ Persistent SQLite Cloud version
+# - No local DB file (Streamlit Cloud filesystem is ephemeral)  # see Streamlit docs note [1]( /
+# - Uses sqlitecloud (sqlite3-compatible DB-API style)          # [2]( /
+# - Uses DB-in-path connection string: ...:8860/Portfolio?apikey=...  # [2]( /
+# - Adds PRESET_PILLARS merged with DB values (fixes "only one pillar")
 # ----------------------------------------------------------
+
+import os
+import io
+from contextlib import contextmanager
+from datetime import datetime, date
+from typing import List, Dict, Optional, Any
+from urllib.parse import urlparse, parse_qs, urlunparse
+import zipfile
+import hashlib
+import hmac
+import datetime as dt
+import re
+from collections import Counter
+
+import pandas as pd
+import plotly.express as px
+import plotly.io as pio
+import streamlit as st
+import sqlitecloud
+from PIL import Image, ImageDraw, ImageFont
+
+# ------------------ Optional dependencies ------------------
+# Optional add-ons (app runs without them)
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
+    REPORTLAB_AVAILABLE = True
+    import streamlit_hotkeys as hotkeys  # optional
+except Exception:
+    REPORTLAB_AVAILABLE = False
+    hotkeys = None
+
+try:
+    import kaleido  # noqa: F401
+
+    KALEIDO_AVAILABLE = True
+    from streamlit_image_zoom import image_zoom  # optional (zoom/pan)
+except Exception:
+    KALEIDO_AVAILABLE = False
+
+# ------------------ Constants ------------------
+TABLE = "projects"
+
+# FIX: HTML entity → real text (prevents Python/UI issues)
+# You originally had "&lt;New Project&gt;" which can cause comparisons to fail if any decoding happens.
+NEW_LABEL = "<New Project>"
+ALL_LABEL = "All"
+
+# FIX: HTML entities → real text (keep your labels readable)
+# Keeping your original intent but using real ampersands avoids UI oddities.
+PRESET_PILLARS = [
+    "Digital Mindset",
+    "Advanced Analytics",
+    "Integration & Visualization",
+    "Data Availability & Connectivity",
+    "Smart Operations",
+    "Vision Lab + Smart operations",
+]
+PRESET_STATUSES = [
+    "Planned",
+    "In Progress",
+    "Completed",
+    "Idea",
+]
+
+
+def now_ts() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ------------------ Safe URL masking for UI/debug ------------------
+def _mask_url(url: str) -> str:
+    try:
+        u = urlparse(url)
+        q = parse_qs(u.query)
+        if "apikey" in q:
+            q["apikey"] = ["****"]
+        masked_query = "&".join([f"{k}={v[0]}" for k, v in q.items()])
+        return f"{u.scheme}://{u.netloc}{u.path}" + (f"?{masked_query}" if masked_query else "")
+    except Exception:
+        return "****"
+
+
+def _normalize_sqlitecloud_netloc(netloc: str) -> str:
+    """
+    Fix common cluster hostname typo: crgxc3wk.g1.sqlite.cloud -> crgxc3wkg1.sqlite.cloud
+    Leaves everything else untouched.
+    """
+    # Separate host:port if present
+    if ":" in netloc:
+        host, port = netloc.rsplit(":", 1)
+        fixed_host = host
+        # Fix pattern: "<something>.g<digits>.sqlite.cloud" -> "<something>g<digits>.sqlite.cloud"
+        # Example: crgxc3wk.g1.sqlite.cloud -> crgxc3wkg1.sqlite.cloud
+        import re
+
+        fixed_host = re.sub(r"([a-zA-Z0-9]+)\.g(\d+\.sqlite\.cloud)$", r"\1g\2", fixed_host)
+        return f"{fixed_host}:{port}"
+    else:
+        import re
+
+        return re.sub(r"([a-zA-Z0-9]+)\.g(\d+\.sqlite\.cloud)$", r"\1g\2", netloc)
+
+
+def _swap_port(url: str, new_port: int) -> str:
+    u = urlparse(url)
+    # Build new netloc with swapped port
+    if u.hostname:
+        host = u.hostname
+        # preserve userinfo if any
+        userinfo = ""
+        if u.username:
+            userinfo = u.username
+            if u.password:
+                userinfo += f":{u.password}"
+            userinfo += "@"
+        netloc = f"{userinfo}{host}:{new_port}"
+        return urlunparse((u.scheme, netloc, u.path, u.params, u.query, u.fragment))
+    return url
+
+
+def _get_sqlitecloud_url() -> str:
+    """
+    Digital Portfolio app:
+    - Uses ONLY SQLITECLOUD_URL_PORTFOLIO to prevent cross-app mixing.
+    """
+    url = (st.secrets.get("SQLITECLOUD_URL_PORTFOLIO") or "").strip()
+
+    if not url:
+        st.error("Missing Streamlit secret: SQLITECLOUD_URL_PORTFOLIO (Digital Portfolio must not share DB).")
+        st.stop()
+
+    if "YOUR_REAL_API_KEY" in url:
+        st.error("SQLiteCloud URL contains placeholder YOUR_REAL_API_KEY.")
+        st.caption(f"Current: {_mask_url(url)}")
+        st.stop()
+
+    return url
+
+
+def _validate_db_name(db_name: str) -> bool:
+    """
+    Keep USE DATABASE but prevent injection / invalid names.
+    Allow typical SQLiteCloud DB names: letters, digits, underscore, dash, dot.
+    """
+    import re
+    return bool(re.fullmatch(r"[A-Za-z0-9_.-]+", db_name))
+
+
+# ------------------ JJMD / Planisware validation ------------------
+import re
+
+JJMD_PATTERN = re.compile(r"^JJMD-\d{7}$", re.IGNORECASE)
+
+
+def validate_plainsware(plainsware_project: str, plainsware_number: Any) -> Optional[str]:
+    """
+    If Plainsware Project = Yes, user must manually enter a Planisware number
+    in the format JJMD-0079575 (JJMD- + 7 digits).
+    """
+    if str(plainsware_project).strip().lower() == "yes":
+        if plainsware_number is None or not str(plainsware_number).strip():
+            raise ValueError("Planisware Project Number is required when Plainsware Project is Yes.")
+        value = str(plainsware_number).strip().upper()
+        if not JJMD_PATTERN.fullmatch(value):
+            raise ValueError("Planisware Project Number must be in the format JJMD-0079575 (JJMD- + 7 digits).")
+        return value
+    return None
+
+
+# ✅ plainsware_number is TEXT
+EXPECTED_COLUMNS = {
+    "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
+    "name": "TEXT NOT NULL",
+    "pillar": "TEXT NOT NULL",
+    "priority": "INTEGER DEFAULT 5",
+    "description": "TEXT",
+    "owner": "TEXT",
+    "status": "TEXT",
+    "start_date": "TEXT",
+    "due_date": "TEXT",
+    "plainsware_project": "TEXT DEFAULT 'No'",
+    "plainsware_number": "TEXT",
+    "created_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+}
+
+
+# ------------------ Misc Helpers ------------------
+def to_iso(d: Optional[date]) -> str:
+    return d.strftime("%Y-%m-%d") if d else ""
+
+
+def try_date(s: Optional[str]) -> Optional[date]:
+    if not s:
+        return None
+    try:
+        return datetime.strptime(str(s), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def safe_index(options: List[str], val: Optional[str], default: int = 0) -> int:
+    try:
+        if val in options:
+            return options.index(val)
+    except Exception:
+        pass
+    return default
+
+
+def safe_int(x: Any, default: int = 5) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+
+def status_to_state(x: Any) -> str:
+    s = str(x).strip().lower()
+    return "Completed" if s in {"done", "complete", "completed"} else "Ongoing"
+
+
+def _clean(s: Any) -> str:
+    return (s or "").strip()
+
+
+# ------------------ Editor helpers (FIXED placement + COMPLETE) ------------------
+# These MUST be top-level functions (not indented inside another function).
+
+def editor_defaults():
+    """Defaults for editor widget keys."""
+    return {
+        "editor_name": "",
+        "editor_pillar": PRESET_PILLARS[0] if PRESET_PILLARS else "",
+        "editor_priority": 5,
+        "editor_desc": "",
+        "editor_owner": "",
+        "editor_status": "",
+        "editor_start": date.today(),
+        "editor_due": date.today(),
+        "editor_plainsware_project": "No",
+        "editor_plainsware_number": "",
+    }
+
+
+def editor_clear_widgets():
+    """Clear EVERYTHING in the editor by resetting widget keys."""
+    for k, v in editor_defaults().items():
+        st.session_state[k] = v
+
+
+def editor_prime_from_loaded(loaded_project: Optional[dict], pillar_options: List[str], status_list: List[str]):
+    """
+    Populate editor widget keys from DB row.
+    Must be called BEFORE the form widgets are created on the run.
+    """
+    if not loaded_project:
+        editor_clear_widgets()
+        return
+
+    st.session_state["editor_name"] = loaded_project.get("name") or ""
+    image_zoom = None
+
+    pv = loaded_project.get("pillar") or (pillar_options[0] if pillar_options else "")
+    st.session_state["editor_pillar"] = pv if pv in pillar_options else (pillar_options[0] if pillar_options else "")
+
+    st.session_state["editor_priority"] = safe_int(loaded_project.get("priority"), 5)
+    st.session_state["editor_desc"] = loaded_project.get("description") or ""
+    st.session_state["editor_owner"] = loaded_project.get("owner") or ""
+
+    sv = loaded_project.get("status") or ""
+    st.session_state["editor_status"] = sv if (sv == "" or sv in status_list) else ""
+
+    st.session_state["editor_start"] = try_date(loaded_project.get("start_date")) or date.today()
+    st.session_state["editor_due"] = try_date(loaded_project.get("due_date")) or date.today()
+
+    pw = loaded_project.get("plainsware_project", "No") or "No"
+    st.session_state["editor_plainsware_project"] = "Yes" if str(pw).strip().lower() == "yes" else "No"
+# ROI rectangle selection (for snapshot)
+try:
+    from streamlit_drawable_canvas import st_canvas  # optional
+except Exception:
+    st_canvas = None
+
+    st.session_state["editor_plainsware_number"] = (loaded_project.get("plainsware_number") or "").strip()
+# -----------------------
+# CONFIG
+# -----------------------
+st.set_page_config(page_title="Holistic FoilVision", layout="wide")
+
+# ✅ Databricks-safe: allow IMAGE_ROOT override (for /Volumes/...) while keeping your Windows default.
+# If IMAGE_ROOT is not set, it falls back to your current working folder.
+DEFAULT_ROOT_FOLDER = r"C:\Holistic_Foil"
+ROOT_FOLDER = os.environ.get("IMAGE_ROOT", "").strip() or DEFAULT_ROOT_FOLDER  # MUST contain subfolders with images
+
+# ------------------ SQLite Cloud Connection (context manager) ------------------
+@contextmanager
+def conn():
+    """
+    Open/close a SQLite Cloud connection.
+    FIX: Hard-pin the DB file using USE DATABASE to avoid any mixing.
+    SQLiteCloud supports selecting DB via USE DATABASE after connecting.
+    """
+    url = _get_sqlitecloud_url()
+SUPPORTED_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+
+    # --- Connection attempts (no deletions; just safer behavior) ---
+    last_exc = None
+    candidates = []
+BASE_DIR = os.path.dirname(__file__)
+
+    candidates.append(url)
+# ✅ Databricks-safe: allow OUTPUT_DIR override (for /Volumes/.../outputs) while keeping local default.
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "").strip() or os.path.join(BASE_DIR, "output")
+SNAPSHOT_DIR = os.path.join(OUTPUT_DIR, "snapshots")
+
+    # normalize hostname typos
+    try:
+        u = urlparse(url)
+        normalized_netloc = _normalize_sqlitecloud_netloc(u.netloc)
+        if normalized_netloc != u.netloc:
+            candidates.append(urlunparse((u.scheme, normalized_netloc, u.path, u.params, u.query, u.fragment)))
+    except Exception:
+        pass
+# Prefer enhanced config if present
+DEFECTS_CONFIG_PATH = os.path.join(BASE_DIR, "defects_config_enhanced.csv")
+if not os.path.isfile(DEFECTS_CONFIG_PATH):
+    DEFECTS_CONFIG_PATH = os.path.join(BASE_DIR, "defects_config.csv")
+
+    # port fallback 8860 -> 8861
+    try:
+        u = urlparse(url)
+        if u.port == 8860:
+            candidates.append(_swap_port(url, 8861))
+            # also combine with normalized host + port swap
+            try:
+                u2 = urlparse(candidates[-1])
+                normalized_netloc2 = _normalize_sqlitecloud_netloc(u2.netloc)
+                if normalized_netloc2 != u2.netloc:
+                    candidates.append(urlunparse((u2.scheme, normalized_netloc2, u2.path, u2.params, u2.query, u2.fragment)))
+            except Exception:
+                pass
+    except Exception:
+        pass
+OPERATORS_CONFIG_PATH = os.path.join(BASE_DIR, "operators.yaml")
+
+    c = None
+    for candidate in candidates:
+        try:
+            c = sqlitecloud.connect(candidate)
+            url = candidate  # remember the one that worked for masking/debug
+            break
+        except Exception as e:
+            last_exc = e
+            c = None
+
+    if c is None:
+        st.error("🚨 Database unavailable (connection attempts failed).")
+        st.caption(f"Connection tried: {_mask_url(candidates[0])}")
+        if len(candidates) > 1:
+            st.caption(f"Fallback tried: {_mask_url(candidates[-1])}")
+        st.exception(last_exc)
+# -----------------------
+# Compatibility helpers
+# -----------------------
+def safe_rerun():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
+    else:
+        st.stop()
+
+    # FIX: Optional but recommended: select DB file after connecting
+    db_name = (st.secrets.get("SQLITECLOUD_DB_PORTFOLIO") or "").strip()
+    try:
+        if db_name:
+            if not _validate_db_name(db_name):
+                st.error("Invalid SQLITECLOUD_DB_PORTFOLIO. Only letters/digits/._- allowed.")
+                st.caption(f"Value: {db_name!r}")
+                st.stop()
+            c.execute(f'USE DATABASE "{db_name}"')
+        yield c
+    finally:
+def notify_success(msg: str):
+    if hasattr(st, "toast"):
+        try:
+            c.close()
+            st.toast(msg)
+            return
+        except Exception:
+            pass
+    st.success(msg)
+
+
+def assert_db_awake():
+    """Fail fast with the real exception (masked URL shown). FIX: uses same URL as conn()."""
+    url = _get_sqlitecloud_url()
+def safe_altair(chart):
+    try:
+        with conn() as c:
+            c.execute("SELECT 1")
+    except Exception as e:
+        st.error("🚨 Database unavailable.")
+        st.caption(f"Connection: {_mask_url(url)}")
+        st.exception(e)
+        st.stop()
+
+
+# ------------------ Schema / Migration Helpers ------------------
+def _table_info_df(c) -> pd.DataFrame:
+    return pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
+
+
+def _needs_rebuild_due_to_created_at(info: pd.DataFrame) -> bool:
+    if info.empty:
+        return False
+    row = info[info["name"] == "created_at"]
+    if row.empty:
+        return False
+    notnull = int(row.iloc[0]["notnull"]) == 1
+    dflt = row.iloc[0]["dflt_value"]
+    no_default = pd.isna(dflt) or str(dflt).strip() == ""
+    return bool(notnull and no_default)
+
+
+def _needs_rebuild_due_to_plainsware_number_type(info: pd.DataFrame) -> bool:
+    if info.empty:
+        return False
+    row = info[info["name"] == "plainsware_number"]
+    if row.empty:
+        return False
+    col_type = str(row.iloc[0]["type"] or "").strip().upper()
+    return col_type != "TEXT"
+
+
+def _rebuild_projects_table(c) -> None:
+    old_info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
+    old_cols = old_info["name"].tolist()
+
+    legacy_map = {
+        "plainsware_proj": "plainsware_project",
+        "plainsware_num": "plainsware_number",
+        st.altair_chart(chart, use_container_width=True)
+    except TypeError:
+        st.altair_chart(chart)
+
+# -----------------------
+# Helpers
+# -----------------------
+def ensure_dirs():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+
+def now_utc_iso():
+    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+def sha256_hex(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def safe_list_subfolders(root_folder: str):
+    if not os.path.isdir(root_folder):
+        return []
+    return sorted([f for f in os.listdir(root_folder) if os.path.isdir(os.path.join(root_folder, f))])
+
+def list_images_recursive(folder_path: str):
+    rels = []
+    if not os.path.isdir(folder_path):
+        return rels
+    for root, _, files in os.walk(folder_path):
+        for fn in files:
+            if fn.lower().endswith(SUPPORTED_EXT):
+                full = os.path.join(root, fn)
+                rels.append(os.path.relpath(full, folder_path))
+    rels.sort()
+    return rels
+
+def summarize_extensions(folder_path: str):
+    exts = []
+    total = 0
+    for root, _, files in os.walk(folder_path):
+        for fn in files:
+            total += 1
+            ext = os.path.splitext(fn)[1].lower() or "(no ext)"
+            exts.append(ext)
+    return total, Counter(exts)
+
+def load_defects_config(path: str) -> pd.DataFrame:
+    if not os.path.isfile(path):
+        return pd.DataFrame([{
+            "defect": "Other",
+            "category": "Other",
+            "defect_family": "Other",
+            "description": "",
+            "classification_options": "Critical\nClass I\nClass II\nClass III",
+            "active": 1,
+            "test_dependent": "No",
+            "vision_eligible": "Yes",
+            "color_hex": "",
+        }])
+
+    df = pd.read_csv(path)
+    defaults = {
+        "defect": "",
+        "category": "Other",
+        "defect_family": "Other",
+        "description": "",
+        "classification_options": "Critical\nClass I\nClass II\nClass III",
+        "active": 1,
+        "test_dependent": "No",
+        "vision_eligible": "Yes",
+        "color_hex": "",
+    }
+    for col, default in defaults.items():
+        if col not in df.columns:
+            df[col] = default
+
+    keep_old, keep_new = [], []
+    for col in old_cols:
+        if col == "id":
+            continue
+        if col in EXPECTED_COLUMNS:
+            keep_old.append(col)
+            keep_new.append(col)
+        elif col in legacy_map and legacy_map[col] in EXPECTED_COLUMNS:
+            keep_old.append(col)
+            keep_new.append(legacy_map[col])
+
+    c.execute("BEGIN")
+    c.execute(
+        f"""
+        CREATE TABLE {TABLE}__new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            pillar TEXT NOT NULL,
+            priority INTEGER DEFAULT 5,
+            description TEXT,
+            owner TEXT,
+            status TEXT,
+            start_date TEXT,
+            due_date TEXT,
+            plainsware_project TEXT DEFAULT 'No',
+            plainsware_number TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    if keep_old:
+        c.execute(
+            f"""
+            INSERT INTO {TABLE}__new ({", ".join(keep_new)})
+            SELECT {", ".join(keep_old)} FROM {TABLE}
+            """
+        )
+
+    c.execute(
+        f"""
+        UPDATE {TABLE}__new
+        SET created_at = COALESCE(NULLIF(created_at,''), CURRENT_TIMESTAMP),
+            updated_at = COALESCE(NULLIF(updated_at,''), CURRENT_TIMESTAMP)
+        """
+    )
+
+    c.execute(f"DROP TABLE {TABLE}")
+    c.execute(f"ALTER TABLE {TABLE}__new RENAME TO {TABLE}")
+    c.execute("COMMIT")
+    df["active"] = pd.to_numeric(df["active"], errors="coerce").fillna(1).astype(int)
+    for c in ["defect", "category", "defect_family", "description", "classification_options",
+              "test_dependent", "vision_eligible", "color_hex"]:
+        df[c] = df[c].astype(str).str.strip()
+
+    df = df[(df["active"] == 1) & (df["defect"] != "")].copy()
+    return df
+
+def ensure_schema_and_migrate() -> None:
+    with conn() as c:
+        c.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                pillar TEXT NOT NULL,
+                priority INTEGER DEFAULT 5,
+                description TEXT,
+                owner TEXT,
+                status TEXT,
+                start_date TEXT,
+                due_date TEXT,
+                plainsware_project TEXT DEFAULT 'No',
+                plainsware_number TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+def load_operator_config(path: str):
+    if not os.path.isfile(path):
+        return None
+    import yaml
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+def verify_login(op_cfg: dict, username: str, password: str) -> bool:
+    salt = str(op_cfg.get("salt", ""))
+    users = op_cfg.get("users", {}) or {}
+    user = users.get(username, {})
+    expected = str(user.get("password_sha256", ""))
+    candidate = sha256_hex(salt + password)
+    return hmac.compare_digest(candidate, expected)
+
+def load_existing_csv(path: str) -> pd.DataFrame:
+    if os.path.isfile(path):
+        try:
+            return pd.read_csv(path)
+        except Exception:
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+def write_csv(path: str, df: pd.DataFrame):
+    df.to_csv(path, index=False)
+
+def dedupe_master(master_df: pd.DataFrame) -> pd.DataFrame:
+    if master_df.empty:
+        return master_df
+    for c in ["Folder", "Image", "Operator"]:
+        if c not in master_df.columns:
+            master_df[c] = ""
+    return master_df.drop_duplicates(subset=["Folder", "Image", "Operator"], keep="last").reset_index(drop=True)
+
+# -------------------------------
+# ✅ ADDITIVE: Robust classification parser
+# Handles separators: newline, |, │, ¦, ; and regex fallback
+# -------------------------------
+def parse_classification_options(raw_value):
+    s = "" if raw_value is None else str(raw_value)
+    s = s.strip()
+    if (not s) or (s.lower() in ("nan", "none")):
+        return ["Critical", "Class I", "Class II", "Class III"]
+
+    for sep in ["\\r\\n", "\\r", "\n", "|", "│", "¦", ";"]:
+        s = s.replace(sep, "\n")
+
+    parts = [p.strip() for p in s.split("\n") if p.strip()]
+
+    if len(parts) <= 1:
+        tokens = re.findall(r"(?i)critical|class\s*i{1,3}\b", s)
+        if tokens:
+            norm = []
+            for t in tokens:
+                tl = t.lower().strip()
+                if tl == "critical":
+                    norm.append("Critical")
+                elif tl.startswith("class"):
+                    roman = re.sub(r"(?i)^class\s*", "", t).strip().upper()
+                    norm.append(f"Class {roman}")
+            seen = set()
+            out = []
+            for x in norm:
+                if x not in seen:
+                    seen.add(x)
+                    out.append(x)
+            if out:
+                parts = out
+
+    if not parts:
+        parts = ["Critical", "Class I", "Class II", "Class III"]
+
+    crit = [x for x in parts if x.strip().lower() == "critical"]
+    rest = [x for x in parts if x.strip().lower() != "critical"]
+    return crit + rest
+
+def build_pareto(df_bad: pd.DataFrame, label_col: str):
+    counts = df_bad.groupby(label_col).size().reset_index(name="Count").sort_values("Count", ascending=False)
+    counts["Cumulative %"] = counts["Count"].cumsum() / max(1, counts["Count"].sum()) * 100
+    return counts
+
+def pareto_chart(pareto_counts: pd.DataFrame, label_col: str, title: str):
+    try:
+        import altair as alt
+        bar = alt.Chart(pareto_counts).mark_bar().encode(
+            x=alt.X(f"{label_col}:N", sort='-y', title=label_col),
+            y=alt.Y("Count:Q", title="Occurrences"),
+            tooltip=[label_col, "Count"]
+        )
+
+        info = _table_info_df(c)
+        existing_set = set(info["name"].tolist())
+
+        if "plainsware_proj" in existing_set and "plainsware_project" not in existing_set:
+            try:
+                c.execute(f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_proj" TO "plainsware_project"')
+            except Exception:
+                _rebuild_projects_table(c)
+
+        if "plainsware_num" in existing_set and "plainsware_number" not in existing_set:
+            try:
+                c.execute(f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_num" TO "plainsware_number"')
+            except Exception:
+                _rebuild_projects_table(c)
+
+        info = _table_info_df(c)
+
+        if _needs_rebuild_due_to_created_at(info):
+            _rebuild_projects_table(c)
+            info = _table_info_df(c)
+
+        if _needs_rebuild_due_to_plainsware_number_type(info):
+            _rebuild_projects_table(c)
+            info = _table_info_df(c)
+
+        existing_set = set(info["name"].tolist())
+
+        for col, ddl in EXPECTED_COLUMNS.items():
+            if col not in existing_set and col not in ("id", "name", "pillar"):
+                try:
+                    c.execute(f"ALTER TABLE {TABLE} ADD COLUMN {col} {ddl}")
+                except Exception:
+                    _rebuild_projects_table(c)
+                    break
+
+
+# FIX: Cache must vary by DB to prevent mixed dropdown values
+_DB_KEY = ""
+
+
+@st.cache_data(show_spinner=False)
+def distinct_values(col: str, _db_key: str = "") -> List[str]:
+    with conn() as c:
+        df = pd.read_sql_query(
+            f"""
+            SELECT DISTINCT {col}
+            FROM {TABLE}
+            WHERE {col} IS NOT NULL AND TRIM({col}) <> ''
+            ORDER BY {col}
+            """,
+            c,
+        line = alt.Chart(pareto_counts).mark_line(color="red").encode(
+            x=alt.X(f"{label_col}:N", sort=pareto_counts[label_col].tolist()),
+            y=alt.Y("Cumulative %:Q", axis=alt.Axis(title="Cumulative %")),
+            tooltip=["Cumulative %"]
+        )
+    return df[col].dropna().astype(str).tolist()
+
+
+def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    q = f"SELECT * FROM {TABLE}"
+    args, where = [], []
+
+    if filters:
+        for col in ["pillar", "status", "owner"]:
+            if filters.get(col) and filters[col] != ALL_LABEL:
+                where.append(f"{col} = ?")
+                args.append(filters[col])
+
+        if filters.get("plainsware") and filters["plainsware"] != ALL_LABEL:
+            where.append("plainsware_project = ?")
+            args.append(filters["plainsware"])
+
+        if filters.get("priority") and filters["priority"] != ALL_LABEL:
+            where.append("priority = ?")
+            try:
+                args.append(int(filters["priority"]))
+            except Exception:
+                where.pop()
+
+        if filters.get("search"):
+            s = f"%{filters['search'].lower()}%"
+            where.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
+            args.extend([s, s])
+
+    if where:
+        q += " WHERE " + " AND ".join(where)
+
+    q += " ORDER BY COALESCE(start_date,''), COALESCE(due_date,''), COALESCE(created_at,'')"
+
+    with conn() as c:
+        return pd.read_sql_query(q, c, params=args)
+
+        return (bar + line).properties(title=title)
+    except Exception:
+        return None
+
+def fetch_all_projects() -> pd.DataFrame:
+    with conn() as c:
+        return pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY id", c)
+# -----------------------
+# Defect color mapping
+# -----------------------
+DEFAULT_PALETTE = [
+    "#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00",
+    "#A65628", "#F781BF", "#999999", "#66C2A5", "#FC8D62",
+    "#8DA0CB", "#E78AC3", "#A6D854", "#FFD92F", "#E5C494"
+]
+
+def deterministic_color(name: str) -> str:
+    h = int(hashlib.md5(name.encode("utf-8")).hexdigest(), 16)
+    return DEFAULT_PALETTE[h % len(DEFAULT_PALETTE)]
+
+def clear_cache() -> None:
+def build_defect_color_map(defects_df: pd.DataFrame) -> dict:
+    m = {}
+    for _, r in defects_df.iterrows():
+        d = str(r.get("defect", "")).strip()
+        if not d:
+            continue
+        cfg_color = str(r.get("color_hex", "")).strip()
+        if cfg_color and cfg_color.startswith("#") and len(cfg_color) in (4, 7):
+            m[d] = cfg_color
+        else:
+            m[d] = deterministic_color(d)
+    return m
+
+# -----------------------
+# Snapshot creation
+# -----------------------
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+def create_snapshot(img: Image.Image, crop_box_xyxy, color_hex: str, label: str) -> Image.Image:
+    x1, y1, x2, y2 = crop_box_xyxy
+    w, h = img.size
+    x1 = clamp(int(round(x1)), 0, w - 1)
+    y1 = clamp(int(round(y1)), 0, h - 1)
+    x2 = clamp(int(round(x2)), 1, w)
+    y2 = clamp(int(round(y2)), 1, h)
+    if x2 <= x1 + 1 or y2 <= y1 + 1:
+        pad = 40
+        x1 = clamp(x1 - pad, 0, w - 1)
+        y1 = clamp(y1 - pad, 0, h - 1)
+        x2 = clamp(x2 + pad, 1, w)
+        y2 = clamp(y2 + pad, 1, h)
+
+    roi = img.crop((x1, y1, x2, y2)).convert("RGB")
+    border = max(6, int(min(roi.size) * 0.02))
+    out = Image.new("RGB", (roi.size[0] + border * 2, roi.size[1] + border * 2), color_hex)
+    out.paste(roi, (border, border))
+
+    bar_h = max(28, int(out.size[1] * 0.08))
+    labeled = Image.new("RGB", (out.size[0], out.size[1] + bar_h), "#111111")
+    labeled.paste(out, (0, bar_h))
+    draw = ImageDraw.Draw(labeled)
+    try:
+        st.cache_data.clear()
+        font = ImageFont.load_default()
+    except Exception:
+        pass
+
+
+# ------------------ PDF Export ------------------
+def build_pdf_report(df: pd.DataFrame, title: str = "Report") -> bytes:
+    if not REPORTLAB_AVAILABLE:
+        return b""
+    buffer = io.BytesIO()
+    cpdf = canvas.Canvas(buffer, pagesize=letter)
+    width, height = letter  # noqa: F841
+
+    cpdf.setFont("Helvetica-Bold", 14)
+    cpdf.drawString(40, height - 40, title)
+
+    cpdf.setFont("Helvetica", 9)
+    y = height - 70
+
+    cols = ["id", "name", "pillar", "priority", "owner", "status",
+            "start_date", "due_date", "plainsware_project", "plainsware_number"]
+    cpdf.drawString(40, y, " | ".join(cols))
+    y -= 14
+
+    for _, row in df.iterrows():
+        line = " | ".join([str(row.get(col, ""))[:40] for col in cols])
+        cpdf.drawString(40, y, line)
+        y -= 12
+        if y < 50:
+            cpdf.showPage()
+            cpdf.setFont("Helvetica", 9)
+            y = height - 50
+
+    cpdf.save()
+    pdf = buffer.getvalue()
+    buffer.close()
+    return pdf
+
+
+# ------------------ App Boot ------------------
+st.set_page_config(page_title="Digital Portfolio", layout="wide")
+st.title("Digital Portfolio — Web Version")
+
+# Now safe to compute DB key (no Streamlit calls before set_page_config)
+_DB_KEY = _mask_url(_get_sqlitecloud_url())
+
+# ✅ APP1 safety lock (must be BEFORE any DB call)
+db_name = (st.secrets.get("SQLITECLOUD_DB_PORTFOLIO") or "").strip()
+
+if not db_name:
+    st.error("❌ Missing secret: SQLITECLOUD_DB_PORTFOLIO")
+        font = None
+    draw.text((10, 6), label, fill=color_hex, font=font)
+    return labeled
+
+def save_snapshot_file(snapshot_img: Image.Image, rel_path_under_output: str) -> str:
+    full_path = os.path.join(OUTPUT_DIR, rel_path_under_output)
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    snapshot_img.save(full_path, format="PNG")
+    return rel_path_under_output
+
+def export_zip_from_master(master_df: pd.DataFrame) -> bytes:
+    bio = io.BytesIO()
+    with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr("MASTER__image_review_results.csv", master_df.to_csv(index=False))
+        if "SnapshotPath" in master_df.columns:
+            snap_paths = (
+                master_df["SnapshotPath"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .loc[lambda s: s != ""]
+                .unique()
+                .tolist()
+            )
+            for relp in snap_paths:
+                fullp = os.path.join(OUTPUT_DIR, relp)
+                if os.path.isfile(fullp):
+                    z.write(fullp, arcname=os.path.join("snapshots", os.path.basename(relp)))
+        z.writestr(
+            "README.txt",
+            "This ZIP contains:\n"
+            " - MASTER__image_review_results.csv\n"
+            " - snapshots/ (PNG files for BAD decisions where ROI was selected)\n\n"
+            "SnapshotPath column in the CSV corresponds to the PNG file name in snapshots/.\n"
+        )
+    return bio.getvalue()
+
+# -----------------------
+# SESSION STATE INIT
+# -----------------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "operator" not in st.session_state:
+    st.session_state.operator = None
+if "current_folder" not in st.session_state:
+    st.session_state.current_folder = None
+if "image_index" not in st.session_state:
+    st.session_state.image_index = 0
+if "results" not in st.session_state:
+    st.session_state.results = []
+if "resume_loaded" not in st.session_state:
+    st.session_state.resume_loaded = False
+
+# -----------------------
+# UI
+# -----------------------
+st.title("Holistic FoilVision")
+ensure_dirs()
+
+# -----------------------
+# LOGIN
+# -----------------------
+st.sidebar.header("🔐 Operator Login")
+op_cfg = load_operator_config(OPERATORS_CONFIG_PATH)
+
+if st.session_state.logged_in and st.sessio# ----------------------------------------------------------
 # Digital Portfolio — Web Version (Portfolio App)
 # ✅ Persistent SQLite Cloud version
 # - No local DB file (Streamlit Cloud filesystem is ephemeral)  # see Streamlit docs note [1]( /
