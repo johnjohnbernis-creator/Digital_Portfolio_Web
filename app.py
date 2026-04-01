@@ -1,196 +1,490 @@
-from __future__ import annotations
+# ----------------------------------------------------------
+# Digital Portfolio — Web Version (Portfolio App)
+# ✅ Persistent SQLite Cloud version
+# - No local DB file (Streamlit Cloud filesystem is ephemeral)  # see Streamlit docs note [1]( /
+# - Uses sqlitecloud (sqlite3-compatible DB-API style)          # [2]( /
+# - Uses DB-in-path connection string: ...:8860/Portfolio?apikey=...  # [2]( /
+# - Adds PRESET_PILLARS merged with DB values (fixes "only one pillar")
+# ----------------------------------------------------------
+
 import os
 import io
+from contextlib import contextmanager
+from datetime import datetime, date
+from typing import List, Dict, Optional, Any
+from urllib.parse import urlparse, parse_qs, urlunparse
 import zipfile
 import hashlib
 import hmac
 import datetime as dt
-from datetime import time
 import re
 from collections import Counter
 
 import pandas as pd
+import plotly.express as px
+import plotly.io as pio
 import streamlit as st
-import uuid
+import sqlitecloud
+from PIL import Image, ImageDraw, ImageFont
 
-# ================================
-# ✅ REQUIRED GLOBAL CONSTANTS (FINAL FIX)
-# ================================
+# ------------------ Optional dependencies ------------------
+# Optional add-ons (app runs without them)
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
+    REPORTLAB_AVAILABLE = True
+    import streamlit_hotkeys as hotkeys  # optional
+except Exception:
+    REPORTLAB_AVAILABLE = False
+    hotkeys = None
+
+try:
+    import kaleido  # noqa: F401
+
+    KALEIDO_AVAILABLE = True
+    from streamlit_image_zoom import image_zoom  # optional (zoom/pan)
+except Exception:
+    KALEIDO_AVAILABLE = False
+
+# ------------------ Constants ------------------
+TABLE = "projects"
+
+# FIX: HTML entity → real text (prevents Python/UI issues)
+# You originally had "&lt;New Project&gt;" which can cause comparisons to fail if any decoding happens.
+NEW_LABEL = "<New Project>"
+ALL_LABEL = "All"
+
+# FIX: HTML entities → real text (keep your labels readable)
+# Keeping your original intent but using real ampersands avoids UI oddities.
+PRESET_PILLARS = [
+    "Digital Mindset",
+    "Advanced Analytics",
+    "Integration & Visualization",
+    "Data Availability & Connectivity",
+    "Smart Operations",
+    "Vision Lab + Smart operations",
+]
+PRESET_STATUSES = [
+    "Planned",
+    "In Progress",
+    "Completed",
+    "Idea",
+]
+
+
+def now_ts() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ------------------ Safe URL masking for UI/debug ------------------
+def _mask_url(url: str) -> str:
+    try:
+        u = urlparse(url)
+        q = parse_qs(u.query)
+        if "apikey" in q:
+            q["apikey"] = ["****"]
+        masked_query = "&".join([f"{k}={v[0]}" for k, v in q.items()])
+        return f"{u.scheme}://{u.netloc}{u.path}" + (f"?{masked_query}" if masked_query else "")
+    except Exception:
+        return "****"
+
+
+def _normalize_sqlitecloud_netloc(netloc: str) -> str:
+    """
+    Fix common cluster hostname typo: crgxc3wk.g1.sqlite.cloud -> crgxc3wkg1.sqlite.cloud
+    Leaves everything else untouched.
+    """
+    # Separate host:port if present
+    if ":" in netloc:
+        host, port = netloc.rsplit(":", 1)
+        fixed_host = host
+        # Fix pattern: "<something>.g<digits>.sqlite.cloud" -> "<something>g<digits>.sqlite.cloud"
+        # Example: crgxc3wk.g1.sqlite.cloud -> crgxc3wkg1.sqlite.cloud
+        import re
+
+        fixed_host = re.sub(r"([a-zA-Z0-9]+)\.g(\d+\.sqlite\.cloud)$", r"\1g\2", fixed_host)
+        return f"{fixed_host}:{port}"
+    else:
+        import re
+
+        return re.sub(r"([a-zA-Z0-9]+)\.g(\d+\.sqlite\.cloud)$", r"\1g\2", netloc)
+
+
+def _swap_port(url: str, new_port: int) -> str:
+    u = urlparse(url)
+    # Build new netloc with swapped port
+    if u.hostname:
+        host = u.hostname
+        # preserve userinfo if any
+        userinfo = ""
+        if u.username:
+            userinfo = u.username
+            if u.password:
+                userinfo += f":{u.password}"
+            userinfo += "@"
+        netloc = f"{userinfo}{host}:{new_port}"
+        return urlunparse((u.scheme, netloc, u.path, u.params, u.query, u.fragment))
+    return url
+
+
+def _get_sqlitecloud_url() -> str:
+    """
+    Digital Portfolio app:
+    - Uses ONLY SQLITECLOUD_URL_PORTFOLIO to prevent cross-app mixing.
+    """
+    url = (st.secrets.get("SQLITECLOUD_URL_PORTFOLIO") or "").strip()
+
+    if not url:
+        st.error("Missing Streamlit secret: SQLITECLOUD_URL_PORTFOLIO (Digital Portfolio must not share DB).")
+        st.stop()
+
+    if "YOUR_REAL_API_KEY" in url:
+        st.error("SQLiteCloud URL contains placeholder YOUR_REAL_API_KEY.")
+        st.caption(f"Current: {_mask_url(url)}")
+        st.stop()
+
+    return url
+
+
+def _validate_db_name(db_name: str) -> bool:
+    """
+    Keep USE DATABASE but prevent injection / invalid names.
+    Allow typical SQLiteCloud DB names: letters, digits, underscore, dash, dot.
+    """
+    import re
+    return bool(re.fullmatch(r"[A-Za-z0-9_.-]+", db_name))
+
+
+# ------------------ JJMD / Planisware validation ------------------
+import re
+
+JJMD_PATTERN = re.compile(r"^JJMD-\d{7}$", re.IGNORECASE)
+
+
+def validate_plainsware(plainsware_project: str, plainsware_number: Any) -> Optional[str]:
+    """
+    If Plainsware Project = Yes, user must manually enter a Planisware number
+    in the format JJMD-0079575 (JJMD- + 7 digits).
+    """
+    if str(plainsware_project).strip().lower() == "yes":
+        if plainsware_number is None or not str(plainsware_number).strip():
+            raise ValueError("Planisware Project Number is required when Plainsware Project is Yes.")
+        value = str(plainsware_number).strip().upper()
+        if not JJMD_PATTERN.fullmatch(value):
+            raise ValueError("Planisware Project Number must be in the format JJMD-0079575 (JJMD- + 7 digits).")
+        return value
+    return None
+
+
+# ✅ plainsware_number is TEXT
+EXPECTED_COLUMNS = {
+    "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
+    "name": "TEXT NOT NULL",
+    "pillar": "TEXT NOT NULL",
+    "priority": "INTEGER DEFAULT 5",
+    "description": "TEXT",
+    "owner": "TEXT",
+    "status": "TEXT",
+    "start_date": "TEXT",
+    "due_date": "TEXT",
+    "plainsware_project": "TEXT DEFAULT 'No'",
+    "plainsware_number": "TEXT",
+    "created_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+}
+
+
+# ------------------ Misc Helpers ------------------
+def to_iso(d: Optional[date]) -> str:
+    return d.strftime("%Y-%m-%d") if d else ""
+
+
+def try_date(s: Optional[str]) -> Optional[date]:
+    if not s:
+        return None
+    try:
+        return datetime.strptime(str(s), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def safe_index(options: List[str], val: Optional[str], default: int = 0) -> int:
+    try:
+        if val in options:
+            return options.index(val)
+    except Exception:
+        pass
+    return default
+
+
+def safe_int(x: Any, default: int = 5) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+
+def status_to_state(x: Any) -> str:
+    s = str(x).strip().lower()
+    return "Completed" if s in {"done", "complete", "completed"} else "Ongoing"
+
+
+def _clean(s: Any) -> str:
+    return (s or "").strip()
+
+
+# ------------------ Editor helpers (FIXED placement + COMPLETE) ------------------
+# These MUST be top-level functions (not indented inside another function).
+
+def editor_defaults():
+    """Defaults for editor widget keys."""
+    return {
+        "editor_name": "",
+        "editor_pillar": PRESET_PILLARS[0] if PRESET_PILLARS else "",
+        "editor_priority": 5,
+        "editor_desc": "",
+        "editor_owner": "",
+        "editor_status": "",
+        "editor_start": date.today(),
+        "editor_due": date.today(),
+        "editor_plainsware_project": "No",
+        "editor_plainsware_number": "",
+    }
+
+
+def editor_clear_widgets():
+    """Clear EVERYTHING in the editor by resetting widget keys."""
+    for k, v in editor_defaults().items():
+        st.session_state[k] = v
+
+
+def editor_prime_from_loaded(loaded_project: Optional[dict], pillar_options: List[str], status_list: List[str]):
+    """
+    Populate editor widget keys from DB row.
+    Must be called BEFORE the form widgets are created on the run.
+    """
+    if not loaded_project:
+        editor_clear_widgets()
+        return
+
+    st.session_state["editor_name"] = loaded_project.get("name") or ""
+    image_zoom = None
+
+    pv = loaded_project.get("pillar") or (pillar_options[0] if pillar_options else "")
+    st.session_state["editor_pillar"] = pv if pv in pillar_options else (pillar_options[0] if pillar_options else "")
+
+    st.session_state["editor_priority"] = safe_int(loaded_project.get("priority"), 5)
+    st.session_state["editor_desc"] = loaded_project.get("description") or ""
+    st.session_state["editor_owner"] = loaded_project.get("owner") or ""
+
+    sv = loaded_project.get("status") or ""
+    st.session_state["editor_status"] = sv if (sv == "" or sv in status_list) else ""
+
+    st.session_state["editor_start"] = try_date(loaded_project.get("start_date")) or date.today()
+    st.session_state["editor_due"] = try_date(loaded_project.get("due_date")) or date.today()
+
+    pw = loaded_project.get("plainsware_project", "No") or "No"
+    st.session_state["editor_plainsware_project"] = "Yes" if str(pw).strip().lower() == "yes" else "No"
+# ROI rectangle selection (for snapshot)
+try:
+    from streamlit_drawable_canvas import st_canvas  # optional
+except Exception:
+    st_canvas = None
+
+    st.session_state["editor_plainsware_number"] = (loaded_project.get("plainsware_number") or "").strip()
+# -----------------------
+# CONFIG
+# -----------------------
+st.set_page_config(page_title="Holistic FoilVision", layout="wide")
+
+# ✅ Databricks-safe: allow IMAGE_ROOT override (for /Volumes/...) while keeping your Windows default.
+# If IMAGE_ROOT is not set, it falls back to your current working folder.
+DEFAULT_ROOT_FOLDER = r"C:\Holistic_Foil"
+ROOT_FOLDER = os.environ.get("IMAGE_ROOT", "").strip() or DEFAULT_ROOT_FOLDER  # MUST contain subfolders with images
+
+# ------------------ SQLite Cloud Connection (context manager) ------------------
+@contextmanager
+def conn():
+    """
+    Open/close a SQLite Cloud connection.
+    FIX: Hard-pin the DB file using USE DATABASE to avoid any mixing.
+    SQLiteCloud supports selecting DB via USE DATABASE after connecting.
+    """
+    url = _get_sqlitecloud_url()
+SUPPORTED_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+
+    # --- Connection attempts (no deletions; just safer behavior) ---
+    last_exc = None
+    candidates = []
 BASE_DIR = os.path.dirname(__file__)
 
-# ✅ ADDITIVE fallback for Streamlit Community Cloud
-# Priority order:
-# 1) IMAGE_ROOT env var (Databricks / production)
-# 2) sample_images/ (Streamlit Community Cloud demo)
-# 3) Original local Windows path (no breakage)
-DEFAULT_ROOT_FOLDER = r"C:\Holistic_Foil"
+    candidates.append(url)
+# ✅ Databricks-safe: allow OUTPUT_DIR override (for /Volumes/.../outputs) while keeping local default.
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "").strip() or os.path.join(BASE_DIR, "output")
+SNAPSHOT_DIR = os.path.join(OUTPUT_DIR, "snapshots")
 
-ROOT_FOLDER = (
-    os.environ.get("IMAGE_ROOT", "").strip()
-    or os.path.join(BASE_DIR, "sample_images")
-    or DEFAULT_ROOT_FOLDER
-)
-# ================================
-# SESSION STATE INITIALIZATION (SAFE)
-# ================================
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-if "operator" not in st.session_state:
-    st.session_state.operator = None
-if "current_folder" not in st.session_state:
-    st.session_state.current_folder = None
-if "image_index" not in st.session_state:
-    st.session_state.image_index = 0
-if "results" not in st.session_state:
-    st.session_state.results = []
-if "resume_loaded" not in st.session_state:
-    st.session_state.resume_loaded = False
-# Keep a global images list so reruns never NameError
-if "images" not in globals():
-    images = []
+    # normalize hostname typos
+    try:
+        u = urlparse(url)
+        normalized_netloc = _normalize_sqlitecloud_netloc(u.netloc)
+        if normalized_netloc != u.netloc:
+            candidates.append(urlunparse((u.scheme, normalized_netloc, u.path, u.params, u.query, u.fragment)))
+    except Exception:
+        pass
+# Prefer enhanced config if present
+DEFECTS_CONFIG_PATH = os.path.join(BASE_DIR, "defects_config_enhanced.csv")
+if not os.path.isfile(DEFECTS_CONFIG_PATH):
+    DEFECTS_CONFIG_PATH = os.path.join(BASE_DIR, "defects_config.csv")
 
-# ================================
-# ✅ FIX: ensure required folders exist
-# ================================
+    # port fallback 8860 -> 8861
+    try:
+        u = urlparse(url)
+        if u.port == 8860:
+            candidates.append(_swap_port(url, 8861))
+            # also combine with normalized host + port swap
+            try:
+                u2 = urlparse(candidates[-1])
+                normalized_netloc2 = _normalize_sqlitecloud_netloc(u2.netloc)
+                if normalized_netloc2 != u2.netloc:
+                    candidates.append(urlunparse((u2.scheme, normalized_netloc2, u2.path, u2.params, u2.query, u2.fragment)))
+            except Exception:
+                pass
+    except Exception:
+        pass
+OPERATORS_CONFIG_PATH = os.path.join(BASE_DIR, "operators.yaml")
+
+    c = None
+    for candidate in candidates:
+        try:
+            c = sqlitecloud.connect(candidate)
+            url = candidate  # remember the one that worked for masking/debug
+            break
+        except Exception as e:
+            last_exc = e
+            c = None
+
+    if c is None:
+        st.error("🚨 Database unavailable (connection attempts failed).")
+        st.caption(f"Connection tried: {_mask_url(candidates[0])}")
+        if len(candidates) > 1:
+            st.caption(f"Fallback tried: {_mask_url(candidates[-1])}")
+        st.exception(last_exc)
+# -----------------------
+# Compatibility helpers
+# -----------------------
+def safe_rerun():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
+    else:
+        st.stop()
+
+    # FIX: Optional but recommended: select DB file after connecting
+    db_name = (st.secrets.get("SQLITECLOUD_DB_PORTFOLIO") or "").strip()
+    try:
+        if db_name:
+            if not _validate_db_name(db_name):
+                st.error("Invalid SQLITECLOUD_DB_PORTFOLIO. Only letters/digits/._- allowed.")
+                st.caption(f"Value: {db_name!r}")
+                st.stop()
+            c.execute(f'USE DATABASE "{db_name}"')
+        yield c
+    finally:
+def notify_success(msg: str):
+    if hasattr(st, "toast"):
+        try:
+            c.close()
+            st.toast(msg)
+            return
+        except Exception:
+            pass
+    st.success(msg)
+
+
+def assert_db_awake():
+    """Fail fast with the real exception (masked URL shown). FIX: uses same URL as conn()."""
+    url = _get_sqlitecloud_url()
+def safe_altair(chart):
+    try:
+        with conn() as c:
+            c.execute("SELECT 1")
+    except Exception as e:
+        st.error("🚨 Database unavailable.")
+        st.caption(f"Connection: {_mask_url(url)}")
+        st.exception(e)
+        st.stop()
+
+
+# ------------------ Schema / Migration Helpers ------------------
+def _table_info_df(c) -> pd.DataFrame:
+    return pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
+
+
+def _needs_rebuild_due_to_created_at(info: pd.DataFrame) -> bool:
+    if info.empty:
+        return False
+    row = info[info["name"] == "created_at"]
+    if row.empty:
+        return False
+    notnull = int(row.iloc[0]["notnull"]) == 1
+    dflt = row.iloc[0]["dflt_value"]
+    no_default = pd.isna(dflt) or str(dflt).strip() == ""
+    return bool(notnull and no_default)
+
+
+def _needs_rebuild_due_to_plainsware_number_type(info: pd.DataFrame) -> bool:
+    if info.empty:
+        return False
+    row = info[info["name"] == "plainsware_number"]
+    if row.empty:
+        return False
+    col_type = str(row.iloc[0]["type"] or "").strip().upper()
+    return col_type != "TEXT"
+
+
+def _rebuild_projects_table(c) -> None:
+    old_info = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)
+    old_cols = old_info["name"].tolist()
+
+    legacy_map = {
+        "plainsware_proj": "plainsware_project",
+        "plainsware_num": "plainsware_number",
+        st.altair_chart(chart, use_container_width=True)
+    except TypeError:
+        st.altair_chart(chart)
+
+# -----------------------
+# Helpers
+# -----------------------
 def ensure_dirs():
-    os.makedirs("logs", exist_ok=True)
-    os.makedirs("uploads", exist_ok=True)
-    os.makedirs("logs", exist_ok=True)
-    os.makedirs("snapshots", exist_ok=True)
-    os.makedirs("exports", exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 
+def now_utc_iso():
+    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
+def sha256_hex(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
-# ✅ ADDITIVE: Shift helper (A/B/C with night-shift safe date)
-
-
-# ================================
-# ✅ ADDITIVE: Upload ZIP / images (Cloud-safe)
-# ================================
-UPLOAD_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
-
-def _sanitize_label(s: str) -> str:
-    s = "" if s is None else str(s)
-    s = re.sub(r"[^A-Za-z0-9_\- ]+", "", s).strip()
-    return s.replace(" ", "_")[:80] or "UPLOAD"
-
-def _safe_extract_zip_images(zip_bytes: bytes, dest_dir: str):
-    """Extract only image files from ZIP into dest_dir, preventing zip-slip."""
-    os.makedirs(dest_dir, exist_ok=True)
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
-        for info in z.infolist():
-            if info.is_dir():
-                continue
-            name = info.filename.replace('\\\\', '/')
-            norm = os.path.normpath(name).lstrip(os.sep).lstrip('/')
-            if norm.startswith('..') or os.path.isabs(norm):
-                continue
-            if not norm.lower().endswith(UPLOAD_EXT):
-                continue
-            out_path = os.path.join(dest_dir, norm)
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            with z.open(info) as rf, open(out_path, 'wb') as wf:
-                wf.write(rf.read())
-
-def _save_uploaded_images(files, dest_dir: str):
-    os.makedirs(dest_dir, exist_ok=True)
-    seen = {}
-    for f in files or []:
-        base = os.path.basename(getattr(f, 'name', 'uploaded'))
-        base = _sanitize_label(base)
-        root, ext = os.path.splitext(base)
-        ext = ext.lower()
-        if ext not in UPLOAD_EXT:
-            continue
-        if base in seen:
-            seen[base] += 1
-            base = f"{root}_{seen[base]}{ext}"
-        else:
-            seen[base] = 0
-        out_path = os.path.join(dest_dir, base)
-        data = f.getvalue() if hasattr(f, 'getvalue') else f.read()
-        with open(out_path, 'wb') as wf:
-            wf.write(data)
-
-def _prepare_uploaded_images_ui():
-    """Sidebar UI: choose ZIP or multi-image upload. Sets session_state upload_* keys."""
-    st.sidebar.markdown('---')
-    st.sidebar.subheader('📁 Image Source')
-    mode = st.sidebar.radio(
-        'Choose source',
-        ['Local folders (on this machine)', 'Upload ZIP (recommended)', 'Upload images (multi-select)'],
-        key='image_source_mode'
-    )
-
-    st.session_state.setdefault('upload_mode', False)
-    st.session_state.setdefault('upload_folder_path', '')
-    st.session_state.setdefault('upload_label', '')
-
-    if mode == 'Upload ZIP (recommended)':
-        zf = st.sidebar.file_uploader(
-            'Upload a ZIP of images (can include subfolders)',
-            type=['zip'],
-            key='zip_uploader'
-        )
-        if zf is not None:
-            token = f"zip::{zf.name}::{getattr(zf, 'size', 0)}"
-            if st.session_state.get('upload_token') != token:
-                upload_id = uuid.uuid4().hex[:10]
-                dest = os.path.join('uploads', f"zip_{upload_id}")
-                _safe_extract_zip_images(zf.getvalue(), dest)
-                st.session_state['upload_token'] = token
-                st.session_state['upload_mode'] = True
-                st.session_state['upload_folder_path'] = dest
-                st.session_state['upload_label'] = f"UPLOAD_{_sanitize_label(zf.name)}"
-            st.sidebar.success('ZIP loaded ✅')
-
-    elif mode == 'Upload images (multi-select)':
-        fs = st.sidebar.file_uploader(
-            'Upload images (select multiple files)',
-            type=[e.lstrip('.') for e in UPLOAD_EXT],
-            accept_multiple_files=True,
-            key='img_uploader'
-        )
-        if fs:
-            token = 'files::' + '|'.join([f"{f.name}:{getattr(f,'size',0)}" for f in fs])
-            if st.session_state.get('upload_token') != token:
-                upload_id = uuid.uuid4().hex[:10]
-                dest = os.path.join('uploads', f"files_{upload_id}")
-                _save_uploaded_images(fs, dest)
-                st.session_state['upload_token'] = token
-                st.session_state['upload_mode'] = True
-                st.session_state['upload_folder_path'] = dest
-                st.session_state['upload_label'] = f"UPLOAD_{upload_id}"
-            st.sidebar.success('Images loaded ✅')
-
-    else:
-        st.session_state['upload_mode'] = False
-
-    return mode
-def get_shift_info(ts: dt.datetime):
-    t = ts.time()
-    if time(6, 0) <= t < time(14, 0):
-        shift = "A"
-        shift_date = ts.date()
-    elif time(14, 0) <= t < time(22, 0):
-        shift = "B"
-        shift_date = ts.date()
-    else:
-        shift = "C"
-        # Night shift belongs to the date it started
-        shift_date = ts.date() if t >= time(22, 0) else (ts.date() - dt.timedelta(days=1))
-    return shift, shift_date
-def list_images_external(folder_path):
-    if not folder_path or not os.path.isdir(folder_path):
+def safe_list_subfolders(root_folder: str):
+    if not os.path.isdir(root_folder):
         return []
+    return sorted([f for f in os.listdir(root_folder) if os.path.isdir(os.path.join(root_folder, f))])
 
-    images = []
+def list_images_recursive(folder_path: str):
+    rels = []
+    if not os.path.isdir(folder_path):
+        return rels
     for root, _, files in os.walk(folder_path):
-        for f in files:
-            if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")):
-                images.append(os.path.join(root, f))
+        for fn in files:
+            if fn.lower().endswith(SUPPORTED_EXT):
+                full = os.path.join(root, fn)
+                rels.append(os.path.relpath(full, folder_path))
+    rels.sort()
+    return rels
 
-    return sorted(images)
 def summarize_extensions(folder_path: str):
     exts = []
     total = 0
@@ -200,11 +494,7 @@ def summarize_extensions(folder_path: str):
             ext = os.path.splitext(fn)[1].lower() or "(no ext)"
             exts.append(ext)
     return total, Counter(exts)
-    try:
-        return pd.read_csv(path)
-    except Exception as e:
-        st.error(f"Failed to load defects config: {e}")
-        return pd.DataFrame()
+
 def load_defects_config(path: str) -> pd.DataFrame:
     if not os.path.isfile(path):
         return pd.DataFrame([{
@@ -235,6 +525,57 @@ def load_defects_config(path: str) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = default
 
+    keep_old, keep_new = [], []
+    for col in old_cols:
+        if col == "id":
+            continue
+        if col in EXPECTED_COLUMNS:
+            keep_old.append(col)
+            keep_new.append(col)
+        elif col in legacy_map and legacy_map[col] in EXPECTED_COLUMNS:
+            keep_old.append(col)
+            keep_new.append(legacy_map[col])
+
+    c.execute("BEGIN")
+    c.execute(
+        f"""
+        CREATE TABLE {TABLE}__new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            pillar TEXT NOT NULL,
+            priority INTEGER DEFAULT 5,
+            description TEXT,
+            owner TEXT,
+            status TEXT,
+            start_date TEXT,
+            due_date TEXT,
+            plainsware_project TEXT DEFAULT 'No',
+            plainsware_number TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    if keep_old:
+        c.execute(
+            f"""
+            INSERT INTO {TABLE}__new ({", ".join(keep_new)})
+            SELECT {", ".join(keep_old)} FROM {TABLE}
+            """
+        )
+
+    c.execute(
+        f"""
+        UPDATE {TABLE}__new
+        SET created_at = COALESCE(NULLIF(created_at,''), CURRENT_TIMESTAMP),
+            updated_at = COALESCE(NULLIF(updated_at,''), CURRENT_TIMESTAMP)
+        """
+    )
+
+    c.execute(f"DROP TABLE {TABLE}")
+    c.execute(f"ALTER TABLE {TABLE}__new RENAME TO {TABLE}")
+    c.execute("COMMIT")
     df["active"] = pd.to_numeric(df["active"], errors="coerce").fillna(1).astype(int)
     for c in ["defect", "category", "defect_family", "description", "classification_options",
               "test_dependent", "vision_eligible", "color_hex"]:
@@ -243,6 +584,26 @@ def load_defects_config(path: str) -> pd.DataFrame:
     df = df[(df["active"] == 1) & (df["defect"] != "")].copy()
     return df
 
+def ensure_schema_and_migrate() -> None:
+    with conn() as c:
+        c.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                pillar TEXT NOT NULL,
+                priority INTEGER DEFAULT 5,
+                description TEXT,
+                owner TEXT,
+                status TEXT,
+                start_date TEXT,
+                due_date TEXT,
+                plainsware_project TEXT DEFAULT 'No',
+                plainsware_number TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
 def load_operator_config(path: str):
     if not os.path.isfile(path):
         return None
@@ -277,7 +638,6 @@ def dedupe_master(master_df: pd.DataFrame) -> pd.DataFrame:
             master_df[c] = ""
     return master_df.drop_duplicates(subset=["Folder", "Image", "Operator"], keep="last").reset_index(drop=True)
 
-
 # -------------------------------
 # ✅ ADDITIVE: Robust classification parser
 # Handles separators: newline, |, │, ¦, ; and regex fallback
@@ -288,15 +648,13 @@ def parse_classification_options(raw_value):
     if (not s) or (s.lower() in ("nan", "none")):
         return ["Critical", "Class I", "Class II", "Class III"]
 
-    # Normalize common separators to newline (keep as escapes, not literal CR)
-    for sep in ["\\r\\n", "\\r", "|", "│", "¦", ";"]:
+    for sep in ["\\r\\n", "\\r", "\n", "|", "│", "¦", ";"]:
         s = s.replace(sep, "\n")
 
     parts = [p.strip() for p in s.split("\n") if p.strip()]
 
-    # Regex fallback if still a single combined token
     if len(parts) <= 1:
-        tokens = re.findall(r"(?i)critical|class\\s*i{1,3}\\b", s)
+        tokens = re.findall(r"(?i)critical|class\s*i{1,3}\b", s)
         if tokens:
             norm = []
             for t in tokens:
@@ -304,7 +662,7 @@ def parse_classification_options(raw_value):
                 if tl == "critical":
                     norm.append("Critical")
                 elif tl.startswith("class"):
-                    roman = re.sub(r"(?i)^class\\s*", "", t).strip().upper()
+                    roman = re.sub(r"(?i)^class\s*", "", t).strip().upper()
                     norm.append(f"Class {roman}")
             seen = set()
             out = []
@@ -318,7 +676,6 @@ def parse_classification_options(raw_value):
     if not parts:
         parts = ["Critical", "Class I", "Class II", "Class III"]
 
-    # Canonical ordering: Critical first if present
     crit = [x for x in parts if x.strip().lower() == "critical"]
     rest = [x for x in parts if x.strip().lower() != "critical"]
     return crit + rest
@@ -336,15 +693,107 @@ def pareto_chart(pareto_counts: pd.DataFrame, label_col: str, title: str):
             y=alt.Y("Count:Q", title="Occurrences"),
             tooltip=[label_col, "Count"]
         )
+
+        info = _table_info_df(c)
+        existing_set = set(info["name"].tolist())
+
+        if "plainsware_proj" in existing_set and "plainsware_project" not in existing_set:
+            try:
+                c.execute(f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_proj" TO "plainsware_project"')
+            except Exception:
+                _rebuild_projects_table(c)
+
+        if "plainsware_num" in existing_set and "plainsware_number" not in existing_set:
+            try:
+                c.execute(f'ALTER TABLE {TABLE} RENAME COLUMN "plainsware_num" TO "plainsware_number"')
+            except Exception:
+                _rebuild_projects_table(c)
+
+        info = _table_info_df(c)
+
+        if _needs_rebuild_due_to_created_at(info):
+            _rebuild_projects_table(c)
+            info = _table_info_df(c)
+
+        if _needs_rebuild_due_to_plainsware_number_type(info):
+            _rebuild_projects_table(c)
+            info = _table_info_df(c)
+
+        existing_set = set(info["name"].tolist())
+
+        for col, ddl in EXPECTED_COLUMNS.items():
+            if col not in existing_set and col not in ("id", "name", "pillar"):
+                try:
+                    c.execute(f"ALTER TABLE {TABLE} ADD COLUMN {col} {ddl}")
+                except Exception:
+                    _rebuild_projects_table(c)
+                    break
+
+
+# FIX: Cache must vary by DB to prevent mixed dropdown values
+_DB_KEY = ""
+
+
+@st.cache_data(show_spinner=False)
+def distinct_values(col: str, _db_key: str = "") -> List[str]:
+    with conn() as c:
+        df = pd.read_sql_query(
+            f"""
+            SELECT DISTINCT {col}
+            FROM {TABLE}
+            WHERE {col} IS NOT NULL AND TRIM({col}) <> ''
+            ORDER BY {col}
+            """,
+            c,
         line = alt.Chart(pareto_counts).mark_line(color="red").encode(
             x=alt.X(f"{label_col}:N", sort=pareto_counts[label_col].tolist()),
             y=alt.Y("Cumulative %:Q", axis=alt.Axis(title="Cumulative %")),
             tooltip=["Cumulative %"]
         )
+    return df[col].dropna().astype(str).tolist()
+
+
+def fetch_df(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    q = f"SELECT * FROM {TABLE}"
+    args, where = [], []
+
+    if filters:
+        for col in ["pillar", "status", "owner"]:
+            if filters.get(col) and filters[col] != ALL_LABEL:
+                where.append(f"{col} = ?")
+                args.append(filters[col])
+
+        if filters.get("plainsware") and filters["plainsware"] != ALL_LABEL:
+            where.append("plainsware_project = ?")
+            args.append(filters["plainsware"])
+
+        if filters.get("priority") and filters["priority"] != ALL_LABEL:
+            where.append("priority = ?")
+            try:
+                args.append(int(filters["priority"]))
+            except Exception:
+                where.pop()
+
+        if filters.get("search"):
+            s = f"%{filters['search'].lower()}%"
+            where.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
+            args.extend([s, s])
+
+    if where:
+        q += " WHERE " + " AND ".join(where)
+
+    q += " ORDER BY COALESCE(start_date,''), COALESCE(due_date,''), COALESCE(created_at,'')"
+
+    with conn() as c:
+        return pd.read_sql_query(q, c, params=args)
+
         return (bar + line).properties(title=title)
     except Exception:
         return None
 
+def fetch_all_projects() -> pd.DataFrame:
+    with conn() as c:
+        return pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY id", c)
 # -----------------------
 # Defect color mapping
 # -----------------------
@@ -358,6 +807,7 @@ def deterministic_color(name: str) -> str:
     h = int(hashlib.md5(name.encode("utf-8")).hexdigest(), 16)
     return DEFAULT_PALETTE[h % len(DEFAULT_PALETTE)]
 
+def clear_cache() -> None:
 def build_defect_color_map(defects_df: pd.DataFrame) -> dict:
     m = {}
     for _, r in defects_df.iterrows():
@@ -384,7 +834,6 @@ def create_snapshot(img: Image.Image, crop_box_xyxy, color_hex: str, label: str)
     y1 = clamp(int(round(y1)), 0, h - 1)
     x2 = clamp(int(round(x2)), 1, w)
     y2 = clamp(int(round(y2)), 1, h)
-
     if x2 <= x1 + 1 or y2 <= y1 + 1:
         pad = 40
         x1 = clamp(x1 - pad, 0, w - 1)
@@ -394,18 +843,66 @@ def create_snapshot(img: Image.Image, crop_box_xyxy, color_hex: str, label: str)
 
     roi = img.crop((x1, y1, x2, y2)).convert("RGB")
     border = max(6, int(min(roi.size) * 0.02))
-
     out = Image.new("RGB", (roi.size[0] + border * 2, roi.size[1] + border * 2), color_hex)
     out.paste(roi, (border, border))
 
     bar_h = max(28, int(out.size[1] * 0.08))
     labeled = Image.new("RGB", (out.size[0], out.size[1] + bar_h), "#111111")
     labeled.paste(out, (0, bar_h))
-
     draw = ImageDraw.Draw(labeled)
     try:
+        st.cache_data.clear()
         font = ImageFont.load_default()
     except Exception:
+        pass
+
+
+# ------------------ PDF Export ------------------
+def build_pdf_report(df: pd.DataFrame, title: str = "Report") -> bytes:
+    if not REPORTLAB_AVAILABLE:
+        return b""
+    buffer = io.BytesIO()
+    cpdf = canvas.Canvas(buffer, pagesize=letter)
+    width, height = letter  # noqa: F841
+
+    cpdf.setFont("Helvetica-Bold", 14)
+    cpdf.drawString(40, height - 40, title)
+
+    cpdf.setFont("Helvetica", 9)
+    y = height - 70
+
+    cols = ["id", "name", "pillar", "priority", "owner", "status",
+            "start_date", "due_date", "plainsware_project", "plainsware_number"]
+    cpdf.drawString(40, y, " | ".join(cols))
+    y -= 14
+
+    for _, row in df.iterrows():
+        line = " | ".join([str(row.get(col, ""))[:40] for col in cols])
+        cpdf.drawString(40, y, line)
+        y -= 12
+        if y < 50:
+            cpdf.showPage()
+            cpdf.setFont("Helvetica", 9)
+            y = height - 50
+
+    cpdf.save()
+    pdf = buffer.getvalue()
+    buffer.close()
+    return pdf
+
+
+# ------------------ App Boot ------------------
+st.set_page_config(page_title="Digital Portfolio", layout="wide")
+st.title("Digital Portfolio — Web Version")
+
+# Now safe to compute DB key (no Streamlit calls before set_page_config)
+_DB_KEY = _mask_url(_get_sqlitecloud_url())
+
+# ✅ APP1 safety lock (must be BEFORE any DB call)
+db_name = (st.secrets.get("SQLITECLOUD_DB_PORTFOLIO") or "").strip()
+
+if not db_name:
+    st.error("❌ Missing secret: SQLITECLOUD_DB_PORTFOLIO")
         font = None
     draw.text((10, 6), label, fill=color_hex, font=font)
     return labeled
@@ -420,7 +917,6 @@ def export_zip_from_master(master_df: pd.DataFrame) -> bytes:
     bio = io.BytesIO()
     with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("MASTER__image_review_results.csv", master_df.to_csv(index=False))
-
         if "SnapshotPath" in master_df.columns:
             snap_paths = (
                 master_df["SnapshotPath"]
@@ -435,7 +931,6 @@ def export_zip_from_master(master_df: pd.DataFrame) -> bytes:
                 fullp = os.path.join(OUTPUT_DIR, relp)
                 if os.path.isfile(fullp):
                     z.write(fullp, arcname=os.path.join("snapshots", os.path.basename(relp)))
-
         z.writestr(
             "README.txt",
             "This ZIP contains:\n"
@@ -467,19 +962,13 @@ if "resume_loaded" not in st.session_state:
 st.title("Holistic FoilVision")
 ensure_dirs()
 
-
 # -----------------------
-# SIMPLE OPERATOR LOGIN (NO PASSWORD)
+# LOGIN
 # -----------------------
 st.sidebar.header("🔐 Operator Login")
+op_cfg = load_operator_config(OPERATORS_CONFIG_PATH)
 
-if not st.session_state.logged_in:
-    operator_name = st.sidebar.text_input("Operator name", value="")
-    if st.sidebar.button("Enter") and operator_name.strip():
-        st.session_state.logged_in = True
-        st.session_state.operator = operator_name.strip()
-        st.rerun()
-else:
+if st.session_state.logged_in and st.session_state.operator:
     st.sidebar.success(f"Logged in as: {st.session_state.operator}")
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
@@ -488,18 +977,37 @@ else:
         st.session_state.image_index = 0
         st.session_state.results = []
         st.session_state.resume_loaded = False
-        st.rerun()
+        safe_rerun()
+else:
+    if op_cfg is None:
+        operator_name = st.sidebar.text_input("Operator name", value="")
+        if st.sidebar.button("Enter") and operator_name.strip():
+            st.session_state.logged_in = True
+            st.session_state.operator = operator_name.strip()
+            safe_rerun()
+    else:
+        users = sorted(list((op_cfg.get("users") or {}).keys()))
+        username = st.sidebar.selectbox("Username", users) if users else st.sidebar.text_input("Username")
+        password = st.sidebar.text_input("Password", type="password")
+        if st.sidebar.button("Login"):
+            if verify_login(op_cfg, username, password):
+                disp = (op_cfg.get("users") or {}).get(username, {}).get("name") or username
+                st.session_state.logged_in = True
+                st.session_state.operator = disp
+                safe_rerun()
+            else:
+                st.sidebar.error("Invalid username/password")
 
 if not st.session_state.logged_in:
     st.stop()
-def load_defects_config(path: str) -> pd.DataFrame:
-    """
-    Load defects configuration from CSV.
-    Safe fallback if file does not exist or fails to load.
-    """
-    if not os.path.isfile(path):
-        st.warning(f"Defects config not found: {path}")
-        return pd.DataFrame()
+
+EXPECTED_DB_PATH = f"/{db_name}"
+actual_path = urlparse(_get_sqlitecloud_url()).path or ""
+
+if actual_path != EXPECTED_DB_PATH:
+    st.error(
+        f"❌ APP1 wrong DB configured. Expected {EXPECTED_DB_PATH}, got {actual_path}"
+    )
 # -----------------------
 # DEFECT CONFIG + FILTERS + LEGEND
 # -----------------------
@@ -517,7 +1025,6 @@ if vision_only:
 
 categories = sorted(filtered_defects["category"].dropna().unique().tolist())
 
-# Legend (description removed)
 with st.sidebar.expander("📘 Defect Legend", expanded=False):
     legend_cols = ["category", "defect_family", "defect", "vision_eligible", "test_dependent"]
     legend = defects_df[legend_cols].copy().sort_values(["category", "defect_family", "defect"])
@@ -531,93 +1038,48 @@ zoom_increment = st.sidebar.slider("Scroll increment", min_value=0.1, max_value=
 behavior_to_mode = {"Click-to-zoom": "dragmove", "Magnifier lens": "mousemove", "Scroll wheel": "scroll", "Both": "both"}
 zoom_mode = behavior_to_mode.get(zoom_behavior, "dragmove")
 
-
-# ================================
-# ✅ GUARANTEED HELPERS (FINAL SAFETY NET)
-# ================================
-if 'safe_list_subfolders' not in globals():
-    def safe_list_subfolders(p):
-        try:
-            return sorted([d for d in os.listdir(p) if os.path.isdir(os.path.join(p, d))])
-        except Exception:
-            return []
-
-# Ensure ROOT_FOLDER always exists
-if not os.path.isdir(ROOT_FOLDER):
-    os.makedirs(ROOT_FOLDER, exist_ok=True)
-
 # -----------------------
 # FOLDER SELECTION
 # -----------------------
+folders = safe_list_subfolders(ROOT_FOLDER)
+if not folders:
+    st.error(f"No subfolders found under ROOT_FOLDER: {ROOT_FOLDER}")
+    st.stop()
 
-# ✅ ADDITIVE ONLY: IMAGE_ROOT override from Streamlit Secrets
-IMAGE_ROOT = st.secrets.get("IMAGE_ROOT", "").strip()
+# ✅ TEMP banner for verification (REMOVE after confirming once)
+st.caption("APP1 DB URL → " + _mask_url(_get_sqlitecloud_url()))
 
-# ✅ SAFE fallback behavior:
-# - If IMAGE_ROOT is valid → locked single-folder mode
-# - If IMAGE_ROOT is invalid/missing → fall back to folder dropdown (no hard stop)
-if IMAGE_ROOT and os.path.isdir(IMAGE_ROOT):
-    selected_folder = os.path.basename(IMAGE_ROOT)
-    folder_path = IMAGE_ROOT
-    images = list_images_external(IMAGE_ROOT)
-else:
-    IMAGE_ROOT = ""  # fallback to ROOT_FOLDER selection
-# ================================
-# SAFETY FIX: ensure helper exists at runtime
-# ================================
-if "list_images_external" not in globals():
-    def list_images_external(folder_path):
-        if not folder_path or not os.path.isdir(folder_path):
-            return []
+assert_db_awake()
+ensure_schema_and_migrate()
+assert_db_awake()
+ensure_schema_and_migrate()
 
-        images = []
-        for root, _, files in os.walk(folder_path):
-            for f in files:
-                if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")):
-                    images.append(os.path.join(root, f))
+# ------------------ Session State ------------------
+if "project_selector" not in st.session_state:
+    st.session_state.project_selector = NEW_LABEL
+if "reset_project_selector" not in st.session_state:
+    st.session_state.reset_project_selector = False
 
-        return sorted(images)
-    if not images:
-        st.error(f"No images found in IMAGE_ROOT: {IMAGE_ROOT}")
-        st.stop()
-else:
-    # fall back to ROOT_FOLDER logic below
-    pass
+# NEW: track last loaded project id to know when to repopulate editor
+if "last_loaded_project_id" not in st.session_state:
+    st.session_state.last_loaded_project_id = None
+selected_folder = st.selectbox("Select a folder with images", folders)
+folder_path = os.path.join(ROOT_FOLDER, selected_folder)
+images = list_images_recursive(folder_path)
 
+if not images:
+    total_files, ext_counts = summarize_extensions(folder_path)
+    st.warning("No images found in this folder.")
+    st.write(f"Folder path: {folder_path}")
+    st.write(f"Total files found (all types): {total_files}")
+    st.write("File extensions found:")
+    st.json({k: int(v) for k, v in ext_counts.most_common(20)})
+    st.info(f"Supported extensions: {', '.join(SUPPORTED_EXT)}")
+    st.stop()
 
-# ✅ ADDITIVE: If user uploaded images, bypass local folder dropdown
-if st.session_state.get("upload_mode", False) and st.session_state.get("upload_folder_path", ""):
-    selected_folder = st.session_state.get("upload_label", "UPLOAD")
-    folder_path = st.session_state.get("upload_folder_path", "")
-    images = list_images_external(folder_path)
-    if not images:
-        total_files, ext_counts = summarize_extensions(folder_path) if os.path.isdir(folder_path) else (0, Counter())
-        st.warning("No images found in uploaded content.")
-        st.write(f"Upload folder path: {folder_path}")
-        st.write(f"Total files found (all types): {total_files}")
-        if hasattr(ext_counts, "most_common"):
-            st.json({k: int(v) for k, v in ext_counts.most_common(20)})
-        st.stop()
-else:
-    folders = safe_list_subfolders(ROOT_FOLDER)
-    if not folders:
-        st.error(f"No subfolders found under ROOT_FOLDER: {ROOT_FOLDER}")
-        st.stop()
-
-    selected_folder = st.selectbox("Select a folder with images", folders)
-    folder_path = os.path.join(ROOT_FOLDER, selected_folder)
-    images = list_images_recursive(folder_path)
-
-    if not images:
-        total_files, ext_counts = summarize_extensions(folder_path)
-        st.warning("No images found in this folder.")
-        st.write(f"Folder path: {folder_path}")
-        st.write(f"Total files found (all types): {total_files}")
-        st.write("File extensions found:")
-        st.json({k: int(v) for k, v in ext_counts.most_common(20)})
-        st.info(f"Supported extensions: {', '.join(SUPPORTED_EXT)}")
-        st.stop()
-
+# NEW: filter reset flag (fix Clear Filters)
+if "reset_filters" not in st.session_state:
+    st.session_state.reset_filters = False
 operator_safe = "".join([c for c in st.session_state.operator if c.isalnum() or c in (" ", "_", "-")]).strip().replace(" ", "_")
 session_results_path = os.path.join(OUTPUT_DIR, f"{selected_folder}__{operator_safe}__results.csv")
 master_results_path = os.path.join(OUTPUT_DIR, "MASTER__image_review_results.csv")
@@ -641,10 +1103,12 @@ if not st.session_state.resume_loaded:
                     if imgname not in reviewed:
                         idx = j
                         break
-                idx = min(j + 1, len(images) - 1)
+                else:
+                    idx = min(len(images) - 1, len(images) - 1)
                 st.session_state.image_index = idx
                 st.session_state.resume_loaded = True
                 safe_rerun()
+
             if st.button("Start fresh"):
                 st.session_state.resume_loaded = True
                 safe_rerun()
@@ -661,8 +1125,6 @@ def defect_key(i): return f"defect_{selected_folder}_{operator_safe}_{i}"
 def class_key(i): return f"class_{selected_folder}_{operator_safe}_{i}"
 def comment_key(i): return f"comment_{selected_folder}_{operator_safe}_{i}"
 def roi_key(i): return f"roi_{selected_folder}_{operator_safe}_{i}"
-
-# ✅ ADDITIVE: Critical confirmation key (does not remove anything)
 def crit_confirm_key(i): return f"crit_confirm_{selected_folder}_{operator_safe}_{i}"
 
 def go_prev():
@@ -677,12 +1139,10 @@ def go_next():
 def save_current():
     i = st.session_state.image_index
     img_rel = images[i]
-
     decision = st.session_state.get(decision_key(i), "Good")
     defect = st.session_state.get(defect_key(i), "")
     classification = st.session_state.get(class_key(i), "")
     comment = st.session_state.get(comment_key(i), "")
-
     roi_xyxy = ""
     snapshot_rel_path = ""
 
@@ -690,12 +1150,9 @@ def save_current():
         if not str(defect).strip():
             st.warning("Select a Defect before saving a Bad decision.")
             return False
-
         if not str(classification).strip():
             st.warning("Select a Classification before saving a Bad decision.")
             return False
-
-        # ✅ ADDITIVE: block save if Critical not confirmed
         if str(classification).strip().lower() == "critical":
             if not bool(st.session_state.get(crit_confirm_key(i), False)):
                 st.warning("Critical classification requires confirmation before saving.")
@@ -707,37 +1164,25 @@ def save_current():
             return False
 
         roi_xyxy = ",".join([str(int(round(x))) for x in roi])
-
         img_path = os.path.join(folder_path, img_rel)
         img = Image.open(img_path)
         color_hex = defect_color_map.get(str(defect).strip(), "#FF00FF")
         label = f"{defect} \n {classification}"
-
         snap = create_snapshot(img, roi, color_hex, label)
-
         review_id = sha256_hex(f"{selected_folder}\n{img_rel}\n{st.session_state.operator}")
         snap_name = f"{selected_folder}__{operator_safe}__{review_id[:12]}__{os.path.basename(img_rel)}.png"
         relp = os.path.join("snapshots", snap_name)
         snapshot_rel_path = save_snapshot_file(snap, relp)
-
     else:
         defect = ""
         classification = ""
         roi_xyxy = ""
         snapshot_rel_path = ""
-
-        # ✅ ADDITIVE: reset critical confirmation when Good
         st.session_state[crit_confirm_key(i)] = False
 
-    ts = dt.datetime.utcnow()
-    shift, shift_date = get_shift_info(ts)
-
     record = {
-        "review_id": sha256_hex(f"{selected_folder}_{img_rel}_{st.session_state.operator}"),
+        "review_id": sha256_hex(f"{selected_folder}\n{img_rel}\n{st.session_state.operator}"),
         "ReviewedAtUTC": now_utc_iso(),
-        "review_date": ts.date().isoformat(),
-        "shift": shift,
-        "shift_date": shift_date.isoformat(),
         "Operator": st.session_state.operator,
         "Folder": selected_folder,
         "Image": img_rel,
@@ -749,13 +1194,18 @@ def save_current():
         "SnapshotPath": snapshot_rel_path,
     }
 
+if st.session_state.reset_project_selector:
+    st.session_state.project_selector = NEW_LABEL
+    st.session_state.reset_project_selector = False
+    st.session_state.last_loaded_project_id = None
+    # also clear editor widgets
+    editor_clear_widgets()
     updated = False
     for k, r in enumerate(st.session_state.results):
         if r.get("Folder") == selected_folder and r.get("Image") == img_rel and r.get("Operator") == st.session_state.operator:
             st.session_state.results[k] = record
             updated = True
             break
-
     if not updated:
         st.session_state.results.append(record)
 
@@ -807,6 +1257,9 @@ with left:
     else:
         st.image(img, width=900)
 
+# ------------------ Project Editor ------------------
+st.markdown("---")
+st.subheader("Project Editor")
     st.markdown("### 🎯 Defect Area (ROI) + Snapshot")
     if current_decision != "Bad":
         st.info("ROI + Snapshot is only required when Decision = Bad.")
@@ -838,6 +1291,8 @@ with left:
                 key=f"canvas_{selected_folder}_{operator_safe}_{i}",
             )
 
+with conn() as c:
+    df_projects = pd.read_sql_query(f"SELECT id, name FROM {TABLE} ORDER BY name", c)
             roi_xyxy = None
             if canvas_result is not None and canvas_result.json_data is not None:
                 objs = canvas_result.json_data.get("objects", [])
@@ -854,23 +1309,19 @@ with left:
                     y2 = (top_px + h_px) / scale
                     roi_xyxy = (x1, y1, x2, y2)
 
-            if roi_xyxy:
-                st.session_state[roi_key(i)] = roi_xyxy
-
-                chosen_def = st.session_state.get(defect_key(i), "")
-                chosen_class = st.session_state.get(class_key(i), "")
-                label = f"{chosen_def} \n {chosen_class}".strip(" \n")
-                preview = create_snapshot(img, roi_xyxy, color_hex, label if label else "Snapshot")
-
-                preview_w = min(900, preview.size[0]) if hasattr(preview, "size") else 900
-                st.image(preview, caption=f"Snapshot Preview (border = {color_hex})", width=preview_w)
-
-            else:
-                st.caption("No ROI selected yet. Draw a rectangle to enable snapshot saving.")
+                    if roi_xyxy:
+                        st.session_state[roi_key(i)] = roi_xyxy
+                        chosen_def = st.session_state.get(defect_key(i), "")
+                        chosen_class = st.session_state.get(class_key(i), "")
+                        label = f"{chosen_def} \n {chosen_class}".strip(" \n")
+                        preview = create_snapshot(img, roi_xyxy, color_hex, label if label else "Snapshot")
+                        preview_w = min(900, preview.size[0]) if hasattr(preview, "size") else 900
+                        st.image(preview, caption=f"Snapshot Preview (border = {color_hex})", width=preview_w)
+                else:
+                    st.caption("No ROI selected yet. Draw a rectangle to enable snapshot saving.")
 
 with right:
     st.subheader("Inspection Decision")
-
     st.radio(
         "Decision",
         ["Good", "Bad"],
@@ -878,6 +1329,7 @@ with right:
         key=decision_key(i),
     )
 
+project_options = [NEW_LABEL] + [f"{row['id']} — {row['name']}" for _, row in df_projects.iterrows()]
     if st.session_state[decision_key(i)] == "Bad":
         if categories:
             if category_key(i) not in st.session_state:
@@ -886,19 +1338,101 @@ with right:
         else:
             chosen_cat = "Other"
 
+selected_project = st.selectbox(
+    "Select Project to Edit",
+    project_options,
+    index=safe_index(project_options, st.session_state.project_selector),
+    key="project_selector",
+)
         df_cat = filtered_defects[filtered_defects["category"] == chosen_cat].copy()
         families = sorted(df_cat["defect_family"].dropna().unique().tolist())
 
+loaded_project = None
+current_project_id = None
+if selected_project != NEW_LABEL:
+    try:
+        current_project_id = int(selected_project.split(" — ", 1)[0])
+        with conn() as c:
+            df = pd.read_sql_query(f"SELECT * FROM {TABLE} WHERE id=?", c, params=[current_project_id])
+        loaded_project = df.iloc[0].to_dict() if not df.empty else None
+    except Exception:
+        loaded_project = None
+        current_project_id = None
+
+# ✅ Digital Portfolio: Pillars are FIXED and NOT read from DB
+pillar_from_db = []  # defined intentionally empty to prevent DB pillar bleed-through
+pillar_options = PRESET_PILLARS.copy()
+pillar_options = sorted(set(PRESET_PILLARS) | set(pillar_from_db))
+
+# FIX: pass _DB_KEY to cached distinct_values
+status_from_db = distinct_values("status", _DB_KEY)
+status_list = sorted(set(PRESET_STATUSES) | set(status_from_db))
+owner_list = distinct_values("owner", _DB_KEY)
+
+bcol1, bcol2 = st.columns([1, 1])
+new_clicked = bcol1.button("New", key="btn_new_project")
+clear_clicked = bcol2.button("Clear Filters", key="btn_clear_filters")
+
+if new_clicked:
+    st.session_state.reset_project_selector = True
+    editor_clear_widgets()
+    st.rerun()
+
+# FIX: Clear Filters reliably resets filter widgets via reset flag
+if clear_clicked:
+    st.session_state.reset_filters = True
+    try:
+        st.toast("Cleared filters.", icon="✅")
+    except Exception:
+        st.success("Cleared filters.")
+    st.rerun()
         if families:
             if family_key(i) not in st.session_state:
                 st.session_state[family_key(i)] = families[0]
             chosen_family = st.selectbox("Defect Family", families, key=family_key(i))
             df_cat = df_cat[df_cat["defect_family"] == chosen_family].copy()
 
+# ✅ FIX: When selection changes, repopulate editor widget keys BEFORE the form
+if current_project_id != st.session_state.last_loaded_project_id:
+    if current_project_id is None:
+        editor_clear_widgets()
+    else:
+        editor_prime_from_loaded(loaded_project, pillar_options, status_list)
+    st.session_state.last_loaded_project_id = current_project_id
         defect_options = df_cat["defect"].tolist()
         chosen_defect = st.selectbox("Defect", defect_options, key=defect_key(i))
-
         c = defect_color_map.get(str(chosen_defect).strip(), "#999999")
+
+# ------------------ Form (Entry) ------------------
+st.markdown("---")
+st.subheader("Project Editor Form")
+
+with st.form("project_form"):
+    c1, c2 = st.columns(2)
+
+    # Preserved variables from your original code (not deleted).
+    # Note: editor fields now come from st.session_state keys.
+    name_val = loaded_project.get("name") if loaded_project else ""
+    pillar_val = loaded_project.get("pillar") if loaded_project else (pillar_options[0] if pillar_options else "")
+    priority_val = int(loaded_project.get("priority", 5)) if loaded_project else 5
+    owner_val = loaded_project.get("owner") if loaded_project else ""
+    status_val = loaded_project.get("status") if loaded_project else ""
+    start_val = try_date(loaded_project.get("start_date")) if loaded_project else date.today()
+    due_val = try_date(loaded_project.get("due_date")) if loaded_project else date.today()
+    desc_val = loaded_project.get("description") if loaded_project else ""
+    pw_val = loaded_project.get("plainsware_project", "No") if loaded_project else "No"
+    pw_num_val = loaded_project.get("plainsware_number") if loaded_project else None
+
+    with c1:
+        project_name = st.text_input("Name*", key="editor_name")
+
+        pillar_index = pillar_options.index(st.session_state.get("editor_pillar", pillar_options[0] if pillar_options else "")) \
+            if (pillar_options and st.session_state.get("editor_pillar") in pillar_options) else 0
+        project_pillar = st.selectbox(
+            "Pillar*",
+            options=pillar_options,
+            index=pillar_index,
+            key="editor_pillar",
         st.markdown(
             f"""
             <div style="display:flex;align-items:center;gap:10px;margin-top:4px;margin-bottom:10px;">
@@ -909,28 +1443,44 @@ with right:
             unsafe_allow_html=True
         )
 
+        project_priority = st.number_input(
+            "Priority",
+            min_value=1,
+            max_value=99,
+            value=int(st.session_state.get("editor_priority", 5)),
+            step=1,
+            format="%d",
+            key="editor_priority",
+        )
         meta = df_cat[df_cat["defect"] == chosen_defect].head(1)
         if not meta.empty and str(meta.iloc[0].get("test_dependent", "No")).lower() == "yes":
             st.warning("⚠️ Test-dependent defect (not image-only).")
 
+        description = st.text_area("Description", height=120, key="editor_desc")
         raw = str(meta.iloc[0].get("classification_options", "Critical\nClass I\nClass II\nClass III")) if not meta.empty else "Critical\nClass I\nClass II\nClass III"
         class_opts = parse_classification_options(raw)
 
-        # -------------------------------
-        # ✅ ADDITIVE CLASSIFICATION UI (DO NOT DELETE ORIGINAL)
-        # - Critical first
-        # - 🛑 icon in UI
-        # - confirmation required
-        # -------------------------------
-        # Original line preserved (not deleted) but disabled to avoid conflicting widgets:
+    with c2:
+        project_owner = st.text_input(
+            "Owner*",
+            key="editor_owner",
+        )
+        # Original selectbox preserved but disabled
         if False:
             st.selectbox("Classification", class_opts, key=class_key(i))
 
-        # New behavior:
+        project_status = st.selectbox(
+            "Status",
+            [""] + status_list,
+            index=safe_index([""] + status_list, st.session_state.get("editor_status", "")),
+            key="editor_status",
+        )
         crit = [x for x in class_opts if x.lower() == "critical"]
         rest = [x for x in class_opts if x.lower() != "critical"]
         ordered = crit + rest
 
+        start_date = st.date_input("Start Date", value=st.session_state.get("editor_start", date.today()), key="editor_start")
+        due_date = st.date_input("Due Date", value=st.session_state.get("editor_due", date.today()), key="editor_due")
         display_map = {}
         display_opts = []
         for v in ordered:
@@ -938,25 +1488,322 @@ with right:
             display_map[d] = v
             display_opts.append(d)
 
+        plainsware_project = st.selectbox(
+            "Plainsware Project?",
+            ["No", "Yes"],
+            index=1 if str(st.session_state.get("editor_plainsware_project", "No")).strip() == "Yes" else 0,
+            key="editor_plainsware_project",
         chosen_display = st.radio(
             "Classification (select one)",
             display_opts,
             key=f"{class_key(i)}__display"
         )
 
-        # store clean value in existing key
+        plainsware_number = None
+        if plainsware_project == "Yes":
+            plainsware_number = st.text_input(
+                "Planisware Project Number (JJMD-0079575)*",
+                placeholder="JJMD-0079575",
+                key="editor_plainsware_number",
+            )
+            if plainsware_number.strip() and not JJMD_PATTERN.fullmatch(plainsware_number.strip()):
+                st.warning("Format must be JJMD-0079575 (JJMD- + 7 digits).")
+        else:
+            plainsware_number = None
+
+    col_a, col_b, col_c = st.columns(3)
+    submitted_new = col_a.form_submit_button("Save New")
+    submitted_update = col_b.form_submit_button("Update")
+    submitted_delete = col_c.form_submit_button("Delete")
+
+# ------------------ CRUD Actions ------------------
+if submitted_new:
+    errors = []
+    project_name_clean = _clean(project_name)
+    project_pillar_clean = _clean(project_pillar)
+    project_owner_clean = _clean(project_owner)
+    project_status_clean = _clean(project_status)
+    safe_priority_val = safe_int(project_priority, default=5)
+
+    if not project_name_clean:
+        errors.append("Name is required.")
+    if not project_pillar_clean:
+        errors.append("Pillar is required.")
+    if not project_owner_clean:
+        errors.append("Owner is required.")
+
+    pw_number_db = None
+    if plainsware_project == "Yes":
+        try:
+            pw_number_db = validate_plainsware(plainsware_project, plainsware_number)
+        except Exception as e:
+            errors.append(str(e))
         st.session_state[class_key(i)] = display_map[chosen_display]
 
-        # show confirmation checkbox if critical
+    if errors:
+        st.error(" ".join(errors))
+    else:
+        ts = now_ts()
+        try:
+            with conn() as c:
+                c.execute(
+                    f"""
+                    INSERT INTO {TABLE}
+                    (name, pillar, priority, description, owner, status, start_date, due_date,
+                     plainsware_project, plainsware_number,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_name_clean,
+                        project_pillar_clean,
+                        safe_priority_val,
+                        _clean(description),
+                        project_owner_clean,
+                        project_status_clean,
+                        to_iso(start_date),
+                        to_iso(due_date),
+                        plainsware_project,
+                        pw_number_db,
+                        ts,
+                        ts,
+                    ),
+                )
+
+            clear_cache()
+            st.success("✅ Project created successfully!")
+            st.session_state.reset_project_selector = True
+            st.rerun()
+
+        except Exception as e:
+            st.error(f"Save error: {e}")
+            st.stop()
+
+if submitted_update:
+    if not loaded_project:
+        st.warning("Select an existing project to update.")
+    else:
+        errors = []
+        project_name_clean = _clean(project_name)
+        project_pillar_clean = _clean(project_pillar)
+        project_owner_clean = _clean(project_owner)
+        project_status_clean = _clean(project_status)
+        safe_priority_val = safe_int(project_priority, default=5)
+
+        if not project_name_clean:
+            errors.append("Name is required.")
+        if not project_pillar_clean:
+            errors.append("Pillar is required.")
+        if not project_owner_clean:
+            errors.append("Owner is required.")
+
+        pw_number_db = None
+        if plainsware_project == "Yes":
+            try:
+                pw_number_db = validate_plainsware(plainsware_project, plainsware_number)
+            except Exception as e:
+                errors.append(str(e))
+
+        if errors:
+            st.error(" ".join(errors))
         if str(st.session_state.get(class_key(i), "")).strip().lower() == "critical":
             st.error("🛑 Critical selected — confirmation required.")
             st.checkbox("I confirm this defect is CRITICAL", key=crit_confirm_key(i))
         else:
+            ts = now_ts()
+            try:
+                with conn() as c:
+                    c.execute(
+                        f"""
+                        UPDATE {TABLE}
+                        SET name=?, pillar=?, priority=?, description=?, owner=?, status=?, start_date=?, due_date=?,
+                            plainsware_project=?, plainsware_number=?,
+                            updated_at=?
+                        WHERE id=?
+                        """,
+                        (
+                            project_name_clean,
+                            project_pillar_clean,
+                            safe_priority_val,
+                            _clean(description),
+                            project_owner_clean,
+                            project_status_clean,
+                            to_iso(start_date),
+                            to_iso(due_date),
+                            plainsware_project,
+                            pw_number_db,
+                            ts,
+                            int(loaded_project["id"]),
+                        ),
+                    )
+
+                clear_cache()
+                st.success("✅ Project updated!")
+                st.rerun()
+
+            except Exception as e:
+                st.error(f"Update error: {e}")
+                st.stop()
+
+if submitted_delete:
+    if not loaded_project:
+        st.warning("Select an existing project to delete.")
+    else:
+        try:
+            with conn() as c:
+                c.execute(f"DELETE FROM {TABLE} WHERE id=?", (int(loaded_project["id"]),))
+            clear_cache()
+            st.warning("Project deleted.")
+            st.session_state.reset_project_selector = True
+            editor_clear_widgets()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Delete error: {e}")
+            st.stop()
+
+# ------------------ Global Filters ------------------
+st.markdown("---")
+st.subheader("Filters")
+
+# ✅ FIX: Apply reset BEFORE creating filter widgets
+if st.session_state.reset_filters:
+    st.session_state["pillar_f"] = ALL_LABEL
+    st.session_state["status_f"] = ALL_LABEL
+    st.session_state["owner_f"] = ALL_LABEL
+    st.session_state["priority_f"] = ALL_LABEL
+    st.session_state["plainsware_f"] = ALL_LABEL
+    st.session_state["search_f"] = ""
+    st.session_state.reset_filters = False
+
+# Ensure filter keys exist (prevents missing-key surprises)
+for k, v in {
+    "pillar_f": ALL_LABEL,
+    "status_f": ALL_LABEL,
+    "owner_f": ALL_LABEL,
+    "priority_f": ALL_LABEL,
+    "plainsware_f": ALL_LABEL,
+    "search_f": "",
+}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+colF1, colF2, colF3, colF4, colF5, colF6 = st.columns([1, 1, 1, 1, 1, 2])
+
+pillars = [ALL_LABEL] + PRESET_PILLARS.copy()
+
+# FIX: pass _DB_KEY to prevent cached bleed
+statuses = [ALL_LABEL] + distinct_values("status", _DB_KEY)
+owners = [ALL_LABEL] + distinct_values("owner", _DB_KEY)
+
+priority_vals: List[int] = []
+try:
+    pv = distinct_values("priority", _DB_KEY)
+    priority_vals = sorted({int(x) for x in pv if str(x).strip().isdigit()})
+except Exception:
+    pass
+priority_opts = [ALL_LABEL] + [str(x) for x in priority_vals]
+plainsware_opts = [ALL_LABEL, "Yes", "No"]
+
+pillar_f = colF1.selectbox("Pillar", pillars, key="pillar_f")
+status_f = colF2.selectbox("Status", statuses, key="status_f")
+owner_f = colF3.selectbox("Owner", owners, key="owner_f")
+priority_f = colF4.selectbox("Priority", priority_opts, key="priority_f")
+plainsware_f = colF5.selectbox("Plainsware", plainsware_opts, key="plainsware_f")
+search_f = colF6.text_input("Search", key="search_f")
+
+filters = dict(
+    pillar=pillar_f,
+    status=status_f,
+    owner=owner_f,
+    priority=priority_f,
+    plainsware=plainsware_f,
+    search=search_f,
+)
+
+data = fetch_df(filters)
+
+# ------------------ Derived Years ------------------
+data["start_year"] = pd.to_datetime(data.get("start_date", ""), errors="coerce").dt.year
+data["due_year"] = pd.to_datetime(data.get("due_date", ""), errors="coerce").dt.year
+
+# ------------------ Report Controls ------------------
+st.markdown("---")
+st.subheader("Report Controls")
             st.session_state[crit_confirm_key(i)] = False
 
+rc1, rc2, rc3, rc4 = st.columns([1, 1, 1, 2])
+year_mode = rc1.radio("Year Type", ["Start Year", "Due Year"], key="year_mode")
+year_col = "start_year" if year_mode == "Start Year" else "due_year"
         st.text_area("Comment (optional)", key=comment_key(i), height=90)
 
+years = [ALL_LABEL] + sorted(data[year_col].dropna().astype(int).unique().tolist())
+year_f = rc2.selectbox("Year", years, key="year_f")
+
+top_n = rc3.slider("Top N per Pillar", min_value=1, max_value=10, value=5, key="top_n")
+show_all = rc4.checkbox("Show ALL Reports", value=True, key="show_all_reports")
+
+if not show_all:
+    cK1, cK2, cK3, cK4 = st.columns(4)
+    show_kpi = cK1.checkbox("KPI Cards", True, key="show_kpi")
+    show_pillar_chart = cK2.checkbox("Pillar Status Chart", True, key="show_pillar_chart")
+    show_roadmap = cK3.checkbox("Roadmap", True, key="show_roadmap")
+    show_table = cK4.checkbox("Projects Table", True, key="show_table")
+else:
+    show_kpi = show_pillar_chart = show_roadmap = show_table = True
+
+if year_f != ALL_LABEL:
+    data = data[data[year_col] == int(year_f)]
+
+# ------------------ KPI Cards ------------------
+if show_kpi:
+    st.markdown("---")
+    k1, k2, k3, k4 = st.columns(4)
+    total = len(data)
+    completed = (data["status"].apply(status_to_state) == "Completed").sum()
+    ongoing = (data["status"].apply(status_to_state) != "Completed").sum()
+    pillars_count = data["pillar"].replace("", pd.NA).dropna().nunique()
+
+    k1.metric("Projects", total)
+    k2.metric("Completed", completed)
+    k3.metric("Ongoing", ongoing)
+    k4.metric("Distinct Pillars", int(pillars_count))
+
+# ------------------ Pillar Status Chart ------------------
+if show_pillar_chart:
+    st.markdown("---")
+    status_df = data.copy()
+    if not status_df.empty:
+        status_df["state"] = status_df["status"].apply(status_to_state)
+        pillar_summary = (
+            status_df.groupby(["pillar", "state"], dropna=False)
+            .size()
+            .reset_index(name="count")
+        )
+        pillar_summary["pillar"] = pillar_summary["pillar"].replace("", "(Unspecified)")
+        fig = px.bar(
+            pillar_summary,
+            x="pillar",
+            y="count",
+            color="state",
+            barmode="group",
+            title="Projects by Pillar — Completed vs Ongoing",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No data available for pillar chart.")
+
+# ------------------ Top N per Pillar ------------------
 st.markdown("---")
+st.subheader(f"Top {top_n} Projects per Pillar")
+
+if not data.empty:
+    top_df = (
+        data.replace({"pillar": {"": "(Unspecified)"}})
+        .sort_values(["pillar", "priority", "name"], na_position="last")
+        .groupby("pillar", dropna=False, as_index=False)
+        .head(top_n)
+    )
+    st.dataframe(top_df, use_container_width=True)
 b1, b2, b3 = st.columns(3)
 
 with b1:
@@ -1012,6 +1859,23 @@ if not src.empty:
     else:
         st.info("No BAD defects recorded yet (Pareto will appear after at least one BAD save).")
 else:
+    st.info("No projects to display for Top N.")
+
+# ------------------ Roadmap ------------------
+roadmap_fig = None
+if show_roadmap:
+    st.markdown("---")
+    st.subheader("Roadmap")
+
+    gantt = data.copy()
+    gantt["Start"] = pd.to_datetime(gantt.get("start_date", ""), errors="coerce")
+    gantt["Finish"] = pd.to_datetime(gantt.get("due_date", ""), errors="coerce")
+    gantt = gantt.dropna(subset=["Start", "Finish"])
+
+    if not gantt.empty:
+        roadmap_fig = px.timeline(
+            gantt, x_start="Start", x_end="Finish", y="name", color="pillar",
+            title="Project Timeline"
     st.info("No saved results yet.")
 
 # -----------------------
@@ -1026,18 +1890,80 @@ with st.sidebar.expander("📄 Reports", expanded=False):
             file_name="MASTER_image_review_results_with_snapshots.zip",
             mime="application/zip"
         )
+        roadmap_fig.update_yaxes(autorange="reversed")
+        st.plotly_chart(roadmap_fig, use_container_width=True)
         st.caption("ZIP includes MASTER CSV + snapshot PNGs (for BAD decisions with ROI).")
     else:
+        st.info("No valid date ranges to draw the roadmap.")
         st.caption("No master results yet. Save at least one review.")
 
-# ✅ ADDITIVE ONLY: External folder image loader (Secrets-aware)
-def list_images_external(folder_path: str):
-    rels = []
-    if not os.path.isdir(folder_path):
-        return rels
-    for root, _, files in os.walk(folder_path):
-        for fn in files:
-            if fn.lower().endswith(SUPPORTED_EXT):
-                full = os.path.join(root, fn)
-                rels.append(os.path.relpath(full, folder_path))
-    return sorted(rels)
+# ------------------ Projects Table ------------------
+if show_table:
+    st.markdown("---")
+    st.subheader("Projects")
+    st.dataframe(data, use_container_width=True)
+
+# ------------------ Export Options ------------------
+st.markdown("---")
+st.subheader("Export Options")
+
+st.download_button(
+    "⬇️ Download CSV Report (Filtered)",
+    data=data.to_csv(index=False).encode("utf-8"),
+    file_name="portfolio_filtered.csv",
+    mime="text/csv",
+    key="export_csv_filtered",
+)
+
+full_df = fetch_all_projects()
+st.download_button(
+    "🗄️ Download FULL Database (CSV)",
+    data=full_df.to_csv(index=False).encode("utf-8"),
+    file_name="portfolio_full_database.csv",
+    mime="text/csv",
+    key="export_csv_full_db",
+)
+
+if REPORTLAB_AVAILABLE:
+    pdf_bytes = build_pdf_report(data, title="Digital Portfolio Report (Filtered)")
+    st.download_button(
+        "🖨️ Download Printable Report (PDF)",
+        data=pdf_bytes,
+        file_name="portfolio_report_filtered.pdf",
+        mime="application/pdf",
+        key="export_pdf_filtered",
+    )
+
+if roadmap_fig is not None:
+    st.markdown("---")
+    st.subheader("Export Roadmap")
+
+    st.download_button(
+        "🌐 Download Roadmap (Interactive HTML)",
+        data=roadmap_fig.to_html(include_plotlyjs="cdn"),
+        file_name="roadmap.html",
+        mime="text/html",
+        key="export_roadmap_html",
+    )
+
+    if KALEIDO_AVAILABLE:
+        try:
+            img_bytes = pio.to_image(roadmap_fig, format="png", scale=2)
+            st.download_button(
+                "📸 Download Roadmap (PNG)",
+                data=img_bytes,
+                file_name="roadmap.png",
+                mime="image/png",
+                key="export_roadmap_png",
+            )
+        except Exception as e:
+            st.info(f"PNG export unavailable in this runtime: {e}")
+
+"""
+Preserved (from your screenshot / paste) — not executed:
+
+Digital Portfolio — Web Version
+Database unavailable.
+SQLiteCloudException: An error occurred while initializing the socket.
+...
+"""
