@@ -712,7 +712,9 @@ def save_current():
         st.session_state[crit_confirm_key(i)] = False
 
     record = {
-        "review_id": sha256_hex(f"{selected_folder}\n{img_rel}\n{st.session_state.operator}"),
+        "review_id": sha256_hex(
+    f"{selected_folder}_{img_rel}_{st.session_state.operator}"
+),
         "ReviewedAtUTC": now_utc_iso(),
         "Operator": st.session_state.operator,
         "Folder": selected_folder,
