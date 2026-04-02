@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 # ==========================================================
-# Digital Portfolio — FINAL STABLE VERSION
-# Roadmap ALWAYS visible (independent of filters)
+# Digital Portfolio — Final Stable Version
+# Roadmap ALWAYS visible | Priority sorted | Editor + Report
 # ==========================================================
 
 import re
 from contextlib import contextmanager
 from datetime import datetime, date
-from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import plotly.express as px
@@ -38,8 +37,6 @@ PRESET_PILLARS = [
 ]
 
 PRESET_STATUSES = ["Idea", "Planned", "In Progress", "Completed"]
-PLAINWARE_OPTIONS = [ALL_LABEL, "Yes", "No"]
-
 JJMD_PATTERN = re.compile(r"^JJMD-\d{7}$", re.IGNORECASE)
 
 EXPECTED_COLUMNS = {
@@ -83,10 +80,6 @@ def try_date(v):
         return None
 
 
-def safe_index(options, value, default=0):
-    return options.index(value) if value in options else default
-
-
 def validate_plainsware(plainsware_project, plainsware_number):
     if str(plainsware_project).strip().lower() == "yes":
         if not plainsware_number:
@@ -128,7 +121,7 @@ def conn():
 
 
 # ==========================================================
-# Schema (safe)
+# Schema safety (NO DATA LOSS)
 # ==========================================================
 def ensure_schema():
     with conn() as c:
@@ -143,7 +136,7 @@ def ensure_schema():
 ensure_schema()
 
 # ==========================================================
-# Load data
+# Data loading
 # ==========================================================
 def fetch_all():
     with conn() as c:
@@ -160,9 +153,6 @@ def fetch_filtered(filters):
     if filters["status"] != ALL_LABEL:
         where.append("status=?")
         args.append(filters["status"])
-    if filters["plainsware_project"] != ALL_LABEL:
-        where.append("plainsware_project=?")
-        args.append(filters["plainsware_project"])
     if filters["priority"] != ALL_LABEL:
         where.append("priority=?")
         args.append(int(filters["priority"]))
@@ -186,37 +176,11 @@ filters = {
     "pillar": st.sidebar.selectbox("Pillar", [ALL_LABEL] + PRESET_PILLARS),
     "status": st.sidebar.selectbox("Status", [ALL_LABEL] + PRESET_STATUSES),
     "priority": st.sidebar.selectbox("Priority", [ALL_LABEL] + [str(i) for i in range(1, 10)]),
-    "plainsware_project": st.sidebar.selectbox("Planisware", PLAINWARE_OPTIONS),
     "search": st.sidebar.text_input("Search"),
 }
 
-# ==========================================================
-# DATASETS
-# ==========================================================
-data_all = fetch_all()              # ✅ FOR ROADMAP (ALWAYS)
-data_filtered = fetch_filtered(filters)
-
-# ==========================================================
-# Year Filter (affects filtered data ONLY)
-# ==========================================================
-st.subheader("🗓️ Year Filter")
-
-year_mode = st.radio("Year Type", ["Start Year", "Due Year"], horizontal=True)
-
-if not data_filtered.empty:
-    data_filtered["start_year"] = pd.to_datetime(
-        data_filtered["start_date"], errors="coerce"
-    ).dt.year
-    data_filtered["due_year"] = pd.to_datetime(
-        data_filtered["due_date"], errors="coerce"
-    ).dt.year
-
-    ycol = "start_year" if year_mode == "Start Year" else "due_year"
-    years = [ALL_LABEL] + sorted(data_filtered[ycol].dropna().unique().tolist())
-
-    yf = st.selectbox("Year", years)
-    if yf != ALL_LABEL:
-        data_filtered = data_filtered[data_filtered[ycol] == yf]
+data_all = fetch_all()                     # ✅ Roadmap source (never filtered)
+data_filtered = fetch_filtered(filters)    # ✅ Table / KPIs / Report
 
 # ==========================================================
 # Project Editor
@@ -241,16 +205,16 @@ c1, c2 = st.columns(2)
 
 with c1:
     name = st.text_input("Name*", loaded.get("name", ""))
-    pillar = st.selectbox("Pillar*", PRESET_PILLARS, index=safe_index(PRESET_PILLARS, loaded.get("pillar", "")))
+    pillar = st.selectbox("Pillar*", PRESET_PILLARS, index=PRESET_PILLARS.index(loaded.get("pillar")) if loaded.get("pillar") in PRESET_PILLARS else 0)
     owner = st.text_input("Owner*", loaded.get("owner", ""))
     priority = st.number_input("Priority", 1, 99, safe_int(loaded.get("priority", 5)))
     desc = st.text_area("Description", loaded.get("description", ""))
 
 with c2:
-    status = st.selectbox("Status", [""] + PRESET_STATUSES, index=safe_index([""] + PRESET_STATUSES, loaded.get("status", "")))
+    status = st.selectbox("Status", [""] + PRESET_STATUSES)
     sd = st.date_input("Start Date", try_date(loaded.get("start_date")) or date.today())
     dd = st.date_input("Due Date", try_date(loaded.get("due_date")) or date.today())
-    pw = st.selectbox("Planisware Project?", ["No", "Yes"], index=1 if loaded.get("plainsware_project") == "Yes" else 0)
+    pw = st.selectbox("Planisware Project?", ["No", "Yes"])
     pwn = st.text_input("Planisware #", loaded.get("plainsware_number", "")) if pw == "Yes" else ""
 
 b1, b2, b3 = st.columns(3)
@@ -293,17 +257,19 @@ st.subheader("📌 KPIs")
 k1, k2, k3 = st.columns(3)
 k1.metric("Projects", len(data_filtered))
 k2.metric("Completed", (data_filtered["status"] == "Completed").sum())
-k3.metric("Distinct Pillars", data_filtered["pillar"].nunique())
+k3.metric("Avg Priority", round(data_filtered["priority"].mean(), 1) if not data_filtered.empty else 0)
 
 # ==========================================================
-# ROADMAP — ALWAYS VISIBLE ✅
+# ROADMAP — ALWAYS VISIBLE + PRIORITY SORT ✅
 # ==========================================================
-st.subheader("🗺️ Roadmap (All Projects)")
+st.subheader("🗺️ Roadmap (Priority Sorted)")
 
 rm = data_all.copy()
 rm["Start"] = pd.to_datetime(rm["start_date"], errors="coerce")
 rm["End"] = pd.to_datetime(rm["due_date"], errors="coerce")
 rm = rm.dropna(subset=["Start", "End"])
+
+rm = rm.sort_values(by=["priority", "Start", "name"])
 
 if rm.empty:
     st.info("No projects have valid Start & Due dates for roadmap.")
@@ -319,7 +285,17 @@ else:
     st.plotly_chart(fig, use_container_width=True)
 
 # ==========================================================
-# Table
+# REPORT SECTION ✅
 # ==========================================================
-st.subheader("📋 Projects")
-st.dataframe(data_filtered, use_container_width=True)
+st.subheader("📑 Report")
+
+report_df = data_filtered.sort_values(by=["priority", "pillar", "name"])
+st.dataframe(report_df, use_container_width=True)
+
+st.download_button(
+    "⬇️ Download Report (CSV)",
+    data=report_df.to_csv(index=False).encode("utf-8"),
+    file_name="digital_portfolio_report.csv",
+    mime="text/csv",
+)
+
