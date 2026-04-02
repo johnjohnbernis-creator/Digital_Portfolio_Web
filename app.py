@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 # ==========================================================
-# Digital Portfolio — FULL VALIDATED APP
-# (Feb-22 validated logic + Project Editor + JJMD + Roadmap)
+# Digital Portfolio — FINAL STABLE VERSION
+# Roadmap ALWAYS visible (independent of filters)
 # ==========================================================
 
 import re
@@ -16,16 +16,15 @@ import streamlit as st
 import sqlitecloud
 
 # ==========================================================
-# Streamlit config (must be first)
+# Streamlit config
 # ==========================================================
 st.set_page_config(page_title="Digital Portfolio", layout="wide")
 st.title("📊 Digital Portfolio")
 
 # ==========================================================
-# Constants / Presets (UNCHANGED)
+# Constants
 # ==========================================================
 TABLE = "projects"
-
 ALL_LABEL = "All"
 NEW_LABEL = "<New Project>"
 
@@ -60,7 +59,7 @@ EXPECTED_COLUMNS = {
 }
 
 # ==========================================================
-# Helpers (unchanged behavior)
+# Helpers
 # ==========================================================
 def now_ts():
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -100,7 +99,7 @@ def validate_plainsware(plainsware_project, plainsware_number):
 
 
 # ==========================================================
-# SQLiteCloud connection (safe)
+# SQLiteCloud connection
 # ==========================================================
 def _get_sqlitecloud_url():
     url = (st.secrets.get("SQLITECLOUD_URL_PORTFOLIO") or "").strip()
@@ -129,7 +128,7 @@ def conn():
 
 
 # ==========================================================
-# Schema safety (NO DATA LOSS)
+# Schema (safe)
 # ==========================================================
 def ensure_schema():
     with conn() as c:
@@ -139,31 +138,35 @@ def ensure_schema():
         cols = pd.read_sql_query(f"PRAGMA table_info({TABLE})", c)["name"].tolist()
         for col, ddl in EXPECTED_COLUMNS.items():
             if col not in cols:
-                try:
-                    c.execute(f"ALTER TABLE {TABLE} ADD COLUMN {col} {ddl}")
-                except Exception:
-                    st.error(f"Schema error adding column: {col}")
-                    st.stop()
+                c.execute(f"ALTER TABLE {TABLE} ADD COLUMN {col} {ddl}")
 
 ensure_schema()
 
 # ==========================================================
-# Load data with filters
+# Load data
 # ==========================================================
-def fetch_df(filters):
+def fetch_all():
+    with conn() as c:
+        return pd.read_sql_query(f"SELECT * FROM {TABLE}", c)
+
+
+def fetch_filtered(filters):
     q = f"SELECT * FROM {TABLE}"
     args, where = [], []
 
-    for col in ["pillar", "status", "owner", "plainsware_project"]:
-        if filters.get(col) and filters[col] != ALL_LABEL:
-            where.append(f"{col}=?")
-            args.append(filters[col])
-
-    if filters.get("priority") and filters["priority"] != ALL_LABEL:
+    if filters["pillar"] != ALL_LABEL:
+        where.append("pillar=?")
+        args.append(filters["pillar"])
+    if filters["status"] != ALL_LABEL:
+        where.append("status=?")
+        args.append(filters["status"])
+    if filters["plainsware_project"] != ALL_LABEL:
+        where.append("plainsware_project=?")
+        args.append(filters["plainsware_project"])
+    if filters["priority"] != ALL_LABEL:
         where.append("priority=?")
         args.append(int(filters["priority"]))
-
-    if filters.get("search"):
+    if filters["search"]:
         s = f"%{filters['search'].lower()}%"
         where.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
         args.extend([s, s])
@@ -175,102 +178,103 @@ def fetch_df(filters):
         return pd.read_sql_query(q, c, params=args)
 
 # ==========================================================
-# Filters UI
+# Sidebar Filters
 # ==========================================================
 st.sidebar.header("Filters")
 
-pillar_f = st.sidebar.selectbox("Pillar", [ALL_LABEL] + PRESET_PILLARS)
-status_f = st.sidebar.selectbox("Status", [ALL_LABEL] + PRESET_STATUSES)
-owner_f = st.sidebar.text_input("Owner")
-priority_f = st.sidebar.selectbox("Priority", [ALL_LABEL] + [str(i) for i in range(1, 10)])
-plainsware_f = st.sidebar.selectbox("Planisware", PLAINWARE_OPTIONS)
-search_f = st.sidebar.text_input("Search")
-
-filters = dict(
-    pillar=pillar_f,
-    status=status_f,
-    owner=owner_f if owner_f else ALL_LABEL,
-    priority=priority_f,
-    plainsware_project=plainsware_f,
-    search=search_f,
-)
-
-data = fetch_df(filters)
+filters = {
+    "pillar": st.sidebar.selectbox("Pillar", [ALL_LABEL] + PRESET_PILLARS),
+    "status": st.sidebar.selectbox("Status", [ALL_LABEL] + PRESET_STATUSES),
+    "priority": st.sidebar.selectbox("Priority", [ALL_LABEL] + [str(i) for i in range(1, 10)]),
+    "plainsware_project": st.sidebar.selectbox("Planisware", PLAINWARE_OPTIONS),
+    "search": st.sidebar.text_input("Search"),
+}
 
 # ==========================================================
-# Year Filter
+# DATASETS
+# ==========================================================
+data_all = fetch_all()              # ✅ FOR ROADMAP (ALWAYS)
+data_filtered = fetch_filtered(filters)
+
+# ==========================================================
+# Year Filter (affects filtered data ONLY)
 # ==========================================================
 st.subheader("🗓️ Year Filter")
-mode = st.radio("Year Type", ["Start Year", "Due Year"], horizontal=True)
 
-if not data.empty:
-    data["start_year"] = pd.to_datetime(data["start_date"], errors="coerce").dt.year
-    data["due_year"] = pd.to_datetime(data["due_date"], errors="coerce").dt.year
-    year_col = "start_year" if mode == "Start Year" else "due_year"
-    years = [ALL_LABEL] + sorted(data[year_col].dropna().unique().tolist())
-    year_f = st.selectbox("Year", years)
-    if year_f != ALL_LABEL:
-        data = data[data[year_col] == year_f]
+year_mode = st.radio("Year Type", ["Start Year", "Due Year"], horizontal=True)
+
+if not data_filtered.empty:
+    data_filtered["start_year"] = pd.to_datetime(
+        data_filtered["start_date"], errors="coerce"
+    ).dt.year
+    data_filtered["due_year"] = pd.to_datetime(
+        data_filtered["due_date"], errors="coerce"
+    ).dt.year
+
+    ycol = "start_year" if year_mode == "Start Year" else "due_year"
+    years = [ALL_LABEL] + sorted(data_filtered[ycol].dropna().unique().tolist())
+
+    yf = st.selectbox("Year", years)
+    if yf != ALL_LABEL:
+        data_filtered = data_filtered[data_filtered[ycol] == yf]
 
 # ==========================================================
-# Project Editor (VALIDATED BEHAVIOR)
+# Project Editor
 # ==========================================================
 st.subheader("✏️ Project Editor")
 
 with conn() as c:
-    proj_list = pd.read_sql_query(f"SELECT id, name FROM {TABLE}", c)
+    plist = pd.read_sql_query(f"SELECT id, name FROM {TABLE}", c)
 
-project_opts = [NEW_LABEL] + [f"{r.id} — {r.name}" for r in proj_list.itertuples(index=False)]
-selected = st.selectbox("Select Project", project_opts)
+opts = [NEW_LABEL] + [f"{r.id} — {r.name}" for r in plist.itertuples(index=False)]
+sel = st.selectbox("Select Project", opts)
 
-loaded = {}
-pid = None
-
-if selected != NEW_LABEL:
-    pid = int(selected.split(" — ")[0])
+loaded, pid = {}, None
+if sel != NEW_LABEL:
+    pid = int(sel.split(" — ")[0])
     with conn() as c:
         df = pd.read_sql_query(f"SELECT * FROM {TABLE} WHERE id=?", c, params=[pid])
     if not df.empty:
         loaded = df.iloc[0].to_dict()
 
-col1, col2 = st.columns(2)
+c1, c2 = st.columns(2)
 
-with col1:
+with c1:
     name = st.text_input("Name*", loaded.get("name", ""))
     pillar = st.selectbox("Pillar*", PRESET_PILLARS, index=safe_index(PRESET_PILLARS, loaded.get("pillar", "")))
     owner = st.text_input("Owner*", loaded.get("owner", ""))
     priority = st.number_input("Priority", 1, 99, safe_int(loaded.get("priority", 5)))
     desc = st.text_area("Description", loaded.get("description", ""))
 
-with col2:
+with c2:
     status = st.selectbox("Status", [""] + PRESET_STATUSES, index=safe_index([""] + PRESET_STATUSES, loaded.get("status", "")))
-    start_date = st.date_input("Start Date", try_date(loaded.get("start_date")) or date.today())
-    due_date = st.date_input("Due Date", try_date(loaded.get("due_date")) or date.today())
-    plainsware_project = st.selectbox("Planisware Project?", ["No", "Yes"], index=1 if loaded.get("plainsware_project") == "Yes" else 0)
-    plainsware_number = st.text_input("Planisware #", loaded.get("plainsware_number", "")) if plainsware_project == "Yes" else ""
+    sd = st.date_input("Start Date", try_date(loaded.get("start_date")) or date.today())
+    dd = st.date_input("Due Date", try_date(loaded.get("due_date")) or date.today())
+    pw = st.selectbox("Planisware Project?", ["No", "Yes"], index=1 if loaded.get("plainsware_project") == "Yes" else 0)
+    pwn = st.text_input("Planisware #", loaded.get("plainsware_number", "")) if pw == "Yes" else ""
 
 b1, b2, b3 = st.columns(3)
 
 if b1.button("Save New"):
-    pw = validate_plainsware(plainsware_project, plainsware_number)
+    pwn_db = validate_plainsware(pw, pwn)
     with conn() as c:
         c.execute(
             f"""INSERT INTO {TABLE}
             (name,pillar,priority,description,owner,status,start_date,due_date,plainsware_project,plainsware_number,created_at,updated_at)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (name,pillar,priority,desc,owner,status,to_iso(start_date),to_iso(due_date),plainsware_project,pw,now_ts(),now_ts())
+            (name,pillar,priority,desc,owner,status,to_iso(sd),to_iso(dd),pw,pwn_db,now_ts(),now_ts())
         )
-    st.success("Project saved")
+    st.success("Project created")
     st.rerun()
 
 if pid and b2.button("Update"):
-    pw = validate_plainsware(plainsware_project, plainsware_number)
+    pwn_db = validate_plainsware(pw, pwn)
     with conn() as c:
         c.execute(
             f"""UPDATE {TABLE}
             SET name=?,pillar=?,priority=?,description=?,owner=?,status=?,start_date=?,due_date=?,plainsware_project=?,plainsware_number=?,updated_at=?
             WHERE id=?""",
-            (name,pillar,priority,desc,owner,status,to_iso(start_date),to_iso(due_date),plainsware_project,pw,now_ts(),pid)
+            (name,pillar,priority,desc,owner,status,to_iso(sd),to_iso(dd),pw,pwn_db,now_ts(),pid)
         )
     st.success("Project updated")
     st.rerun()
@@ -282,27 +286,40 @@ if pid and b3.button("Delete"):
     st.rerun()
 
 # ==========================================================
-# KPIs + Roadmap
+# KPIs
 # ==========================================================
 st.subheader("📌 KPIs")
 
-k1, k2 = st.columns(2)
-k1.metric("Total Projects", len(data))
-k2.metric("Completed", (data["status"] == "Completed").sum())
+k1, k2, k3 = st.columns(3)
+k1.metric("Projects", len(data_filtered))
+k2.metric("Completed", (data_filtered["status"] == "Completed").sum())
+k3.metric("Distinct Pillars", data_filtered["pillar"].nunique())
 
-st.subheader("🗺️ Roadmap")
+# ==========================================================
+# ROADMAP — ALWAYS VISIBLE ✅
+# ==========================================================
+st.subheader("🗺️ Roadmap (All Projects)")
 
-if not data.empty:
-    rd = data.dropna(subset=["start_date", "due_date"]).copy()
-    rd["Start"] = pd.to_datetime(rd["start_date"])
-    rd["End"] = pd.to_datetime(rd["due_date"])
+rm = data_all.copy()
+rm["Start"] = pd.to_datetime(rm["start_date"], errors="coerce")
+rm["End"] = pd.to_datetime(rm["due_date"], errors="coerce")
+rm = rm.dropna(subset=["Start", "End"])
 
-    if not rd.empty:
-        fig = px.timeline(rd, x_start="Start", x_end="End", y="name", color="pillar")
-        fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No valid dates for roadmap")
+if rm.empty:
+    st.info("No projects have valid Start & Due dates for roadmap.")
+else:
+    fig = px.timeline(
+        rm,
+        x_start="Start",
+        x_end="End",
+        y="name",
+        color="pillar",
+    )
+    fig.update_yaxes(autorange="reversed")
+    st.plotly_chart(fig, use_container_width=True)
 
+# ==========================================================
+# Table
+# ==========================================================
 st.subheader("📋 Projects")
-st.dataframe(data, use_container_width=True)
+st.dataframe(data_filtered, use_container_width=True)
