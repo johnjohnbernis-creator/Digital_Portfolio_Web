@@ -310,7 +310,8 @@ def conn():
     Open/close a SQLite Cloud connection.
     FIX: Hard-pin the DB file using USE DATABASE to avoid any mixing.
     SQLiteCloud supports selecting DB via USE DATABASE after connecting.
-       url = _get_sqlitecloud_url()
+    """
+    url = _get_sqlitecloud_url()
 SUPPORTED_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
     # --- Connection attempts (no deletions; just safer behavior) ---
@@ -1964,3 +1965,5 @@ Preserved (from your screenshot / paste) — not executed:
 Digital Portfolio — Web Version
 Database unavailable.
 SQLiteCloudException: An error occurred while initializing the socket.
+...
+"""
