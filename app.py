@@ -254,7 +254,6 @@ def fetch_all():
     with conn() as c:
         return pd.read_sql_query(f"SELECT * FROM {TABLE}", c)
 
-
 def fetch_filtered(filters):
     q = f"SELECT * FROM {TABLE}"
     args = []
