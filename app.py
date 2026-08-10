@@ -246,13 +246,18 @@ def ensure_schema():
 
 ensure_schema()
 
-
 # ==========================================================
 # Data loading
 # ==========================================================
 def fetch_all():
     with conn() as c:
         return pd.read_sql_query(f"SELECT * FROM {TABLE}", c)
+
+
+def fetch_filtered(filters):
+    q = f"SELECT * FROM {TABLE}"
+    args = []
+    where = []
 
     if filters["pillar"] != ALL_LABEL:
         where.append("pillar=?")
@@ -310,6 +315,7 @@ def fetch_all():
 
     with conn() as c:
         return pd.read_sql_query(q, c, params=args)
+
 
 def enrich_data(df):
     if df.empty:
