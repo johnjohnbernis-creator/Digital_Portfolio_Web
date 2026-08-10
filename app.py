@@ -312,7 +312,6 @@ if filters["priority"] != ALL_LABEL:
     with conn() as c:
         return pd.read_sql_query(q, c, params=args)
 
-
 def enrich_data(df):
     if df.empty:
         return df
