@@ -389,11 +389,22 @@ st.sidebar.header("Filters")
 filters = {
     "pillar": st.sidebar.selectbox("Pillar", [ALL_LABEL] + PRESET_PILLARS),
     "status": st.sidebar.selectbox("Status", [ALL_LABEL] + PRESET_STATUSES),
+
+    "kpi": st.sidebar.selectbox(
+        "KPI Lever",
+        [ALL_LABEL] + PRESET_KPI_LEVERS
+    ),
+
     "priority": st.sidebar.selectbox(
         "Priority",
         [ALL_LABEL] + [str(i) for i in range(1, 100)],
     ),
-    "year": st.sidebar.selectbox("Year", [ALL_LABEL] + available_years),
+
+    "year": st.sidebar.selectbox(
+        "Year",
+        [ALL_LABEL] + available_years
+    ),
+
     "search": st.sidebar.text_input("Search"),
 }
 
