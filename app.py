@@ -260,17 +260,17 @@ def fetch_filtered(filters):
     args = []
     where = []
 
-    if filters["pillar"] != ALL_LABEL:
-        where.append("pillar=?")
-        args.append(filters["pillar"])
+if filters["status"] != ALL_LABEL:
+    where.append("status=?")
+    args.append(filters["status"])
 
-    if filters["status"] != ALL_LABEL:
-        where.append("status=?")
-        args.append(filters["status"])
+if filters["kpi"] != ALL_LABEL:
+    where.append("kpi_lever=?")
+    args.append(filters["kpi"])
 
-    if filters["priority"] != ALL_LABEL:
-        where.append("priority=?")
-        args.append(int(filters["priority"]))
+if filters["priority"] != ALL_LABEL:
+    where.append("priority=?")
+    args.append(int(filters["priority"]))
 
     if filters["year"] != ALL_LABEL:
         where.append(
